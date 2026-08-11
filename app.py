@@ -15,6 +15,7 @@ from pathlib import Path
 import tkinter as tk
 
 from cards import CardDb
+from images import ArtStore, TILE_H, TILE_W
 from parser import BgGame
 
 POLL_SECONDS = 1.0
@@ -143,6 +144,89 @@ class LogTailer(threading.Thread):
         self.current = None
 
 
+class Tooltip:
+    """Card popup next to the tracker window: full render when the art CDN
+    has one, otherwise name + tier/tribe + effect text."""
+
+    def __init__(self, root: tk.Tk, cards: CardDb, art: ArtStore):
+        self.root = root
+        self.cards = cards
+        self.art = art
+        self.win: tk.Toplevel | None = None
+        self._pending: tuple | None = None  # (widget, after_id)
+
+    def attach(self, widget, card_id: str, extra: str = ""):
+        widget.bind("<Enter>", lambda _e: self._schedule(widget, card_id, extra), add="+")
+        widget.bind("<Leave>", lambda _e: self.hide(), add="+")
+
+    def _schedule(self, widget, card_id, extra):
+        self.hide()
+        after_id = widget.after(250, lambda: self._show(widget, card_id, extra))
+        self._pending = (widget, after_id)
+
+    def hide(self):
+        if self._pending is not None:
+            widget, after_id = self._pending
+            try:
+                widget.after_cancel(after_id)
+            except tk.TclError:
+                pass
+            self._pending = None
+        if self.win is not None:
+            try:
+                self.win.destroy()
+            except tk.TclError:
+                pass
+            self.win = None
+
+    def _show(self, widget, card_id, extra):
+        self._pending = None
+        win = tk.Toplevel(self.root)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        win.configure(bg="#0c0c0e")
+        inner = tk.Frame(win, bg="#0c0c0e", padx=6, pady=6)
+        inner.pack()
+
+        render = self.art.get_render(card_id)
+        if render is not None:
+            lbl = tk.Label(inner, image=render, bg="#0c0c0e", bd=0)
+            lbl.image = render
+            lbl.pack()
+        else:
+            name = self.cards.name(card_id)
+            tk.Label(inner, text=name, bg="#0c0c0e", fg=FG,
+                     font=("Segoe UI", 10, "bold"), anchor="w").pack(fill="x")
+            sub = []
+            tier = self.cards.tech_level(card_id)
+            if tier:
+                sub.append(f"Tier {tier}")
+            races = self.cards.races(card_id)
+            if races:
+                sub.append("/".join(r.title() for r in races))
+            if sub:
+                tk.Label(inner, text=" · ".join(sub), bg="#0c0c0e", fg=FG_DIM,
+                         font=("Segoe UI", 8), anchor="w").pack(fill="x")
+            text = self.cards.text(card_id)
+            if text:
+                tk.Label(inner, text=text, bg="#0c0c0e", fg=FG,
+                         font=("Segoe UI", 9), wraplength=230,
+                         justify="left", anchor="w").pack(fill="x", pady=(3, 0))
+        if extra:
+            tk.Label(inner, text=extra, bg="#0c0c0e", fg=GOLD,
+                     font=("Segoe UI", 8), wraplength=230,
+                     justify="left", anchor="w").pack(fill="x", pady=(3, 0))
+
+        win.update_idletasks()
+        w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+        x = self.root.winfo_rootx() - w - 8
+        if x < 0:
+            x = self.root.winfo_rootx() + self.root.winfo_width() + 8
+        y = min(widget.winfo_rooty(), self.root.winfo_screenheight() - h - 10)
+        win.geometry(f"+{x}+{y}")
+        self.win = win
+
+
 class TrackerApp:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -151,6 +235,9 @@ class TrackerApp:
         self.lock = threading.Lock()
         self.game = BgGame()
         self.dirty = threading.Event()
+        self.art_dirty = threading.Event()
+        self.art = ArtStore(on_new=self.art_dirty.set)
+        self.tooltip = Tooltip(root, self.cards, self.art)
         self.hovered_pid: int | None = None
         self.pinned_pid: int | None = None
 
@@ -225,6 +312,11 @@ class TrackerApp:
         ).pack(fill="x", side="bottom", padx=8, pady=(0, 6))
 
     def _poll(self):
+        if self.art_dirty.is_set():
+            # New card art landed on disk — force the detail pane to rebuild.
+            self.art_dirty.clear()
+            self._detail_key = None
+            self.dirty.set()
         if self.dirty.is_set():
             self.dirty.clear()
             self.refresh()
@@ -450,6 +542,7 @@ class TrackerApp:
             return
         self._detail_key = key
 
+        self.tooltip.hide()
         for w in self.detail.winfo_children():
             w.destroy()
 
@@ -471,22 +564,27 @@ class TrackerApp:
             title += f"  T{snap.tech_level}"
         self.detail_title.configure(text=title)
 
-        meta = []
-        if snap.result == "win":
-            meta.append(f"you won (+{snap.result_dmg})")
-        elif snap.result == "loss":
-            meta.append(f"you lost (-{snap.result_dmg})")
-        elif snap.result == "tie":
-            meta.append("tied")
-        if snap.hero_power:
-            meta.append("⚡ " + self.cards.name(snap.hero_power))
-        if snap.trinkets:
-            meta.append("🎁 " + ", ".join(self.cards.name(t) for t in snap.trinkets))
-        if meta:
-            tk.Label(
-                self.detail, text="   ·   ".join(meta), bg=BG, fg=FG_DIM,
-                font=("Segoe UI", 9), anchor="w", wraplength=330, justify="left",
-            ).pack(fill="x", padx=4, pady=(0, 2))
+        result_txt = {
+            "win": f"you won (+{snap.result_dmg})",
+            "loss": f"you lost (-{snap.result_dmg})",
+            "tie": "tied",
+        }.get(snap.result, "")
+        if result_txt or snap.hero_power or snap.trinkets:
+            meta = tk.Frame(self.detail, bg=BG)
+            meta.pack(fill="x", padx=4, pady=(0, 2))
+            if result_txt:
+                tk.Label(meta, text=result_txt, bg=BG, fg=FG_DIM,
+                         font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
+            hoverables = []
+            if snap.hero_power:
+                hoverables.append(("⚡ " + self.cards.name(snap.hero_power), snap.hero_power))
+            for t in snap.trinkets:
+                hoverables.append(("🎁 " + self.cards.name(t), t))
+            for text, cid in hoverables:
+                lbl = tk.Label(meta, text=text, bg=BG, fg=FG_DIM,
+                               font=("Segoe UI", 9, "underline"))
+                lbl.pack(side="left", padx=(0, 8))
+                self.tooltip.attach(lbl, cid)
 
         if len(hist) > 1:
             rounds = tk.Frame(self.detail, bg=BG)
@@ -511,23 +609,64 @@ class TrackerApp:
             ).pack(fill="x", padx=4)
             return
         for m in snap.minions:
-            name = self.cards.name(m.card_id, m.name)
-            line = tk.Frame(self.detail, bg=BG)
-            line.pack(fill="x", padx=4, pady=1)
+            self._minion_row(m)
+
+    ART_W = 150  # right part of the tile shown; the left fade is clipped off
+
+    def _minion_row(self, m):
+        h = TILE_H + 2
+        row = tk.Frame(self.detail, bg=BG_ROW, height=h)
+        row.pack(fill="x", padx=4, pady=1)
+        row.pack_propagate(False)
+        if m.golden:
+            row.configure(
+                highlightbackground=GOLD, highlightcolor=GOLD, highlightthickness=1
+            )
+
+        c = tk.Canvas(row, width=self.ART_W, height=h, bg=BG_ROW, highlightthickness=0)
+        c.pack(side="right")
+        tile = self.art.get_tile(m.card_id)
+        if tile is not None:
+            # Right-anchored: the tile's white left fade hangs past the
+            # canvas edge and gets clipped.
+            c.create_image(self.ART_W, h // 2, image=tile, anchor="e")
+            c.image = tile  # keep a reference or tk garbage-collects it
+            # Screen-door blend so the art edge doesn't cut hard.
+            for width, stipple in ((26, "gray25"), (18, "gray50"), (9, "gray75")):
+                c.create_rectangle(
+                    0, 0, width, h, fill=BG_ROW, width=0, stipple=stipple
+                )
+        stats = f"{m.attack}/{m.health}"
+        sw = 7 * len(stats) + 10
+        c.create_rectangle(
+            self.ART_W - sw - 2, h - 18, self.ART_W - 2, h - 3,
+            fill="#101014", outline="#000",
+        )
+        c.create_text(
+            self.ART_W - 2 - sw / 2, h - 10, text=stats,
+            fill=GOLD if m.golden else "#ffffff", font=("Consolas", 9, "bold"),
+        )
+
+        texts = tk.Frame(row, bg=BG_ROW)
+        texts.pack(side="left", fill="both", expand=True, padx=(8, 0))
+        name = self.cards.name(m.card_id, m.name)
+        if m.golden:
+            name += " ★"
+        tk.Label(
+            texts, text=name, bg=BG_ROW, fg=GOLD if m.golden else FG,
+            font=("Segoe UI", 9, "bold"), anchor="w",
+        ).pack(fill="x", pady=(5, 0))
+        if m.keywords:
             tk.Label(
-                line,
-                text=f"{m.attack}/{m.health}",
-                bg=BG, fg=GOLD if m.golden else FG_DIM,
-                font=("Consolas", 10), width=9, anchor="e",
-            ).pack(side="left")
-            label = name + (" ★" if m.golden else "")
-            if m.keywords:
-                label += "  ·  " + ", ".join(m.keywords)
-            tk.Label(
-                line, text=label, bg=BG,
-                fg=GOLD if m.golden else FG,
-                font=("Segoe UI", 10), anchor="w",
-            ).pack(side="left", padx=(8, 0))
+                texts, text=", ".join(m.keywords), bg=BG_ROW, fg=FG_DIM,
+                font=("Segoe UI", 7), anchor="w",
+            ).pack(fill="x")
+
+        extra = ", ".join(m.keywords)
+        if m.golden:
+            extra = ("Golden · " + extra) if extra else "Golden"
+        for w in (row, c, texts, *texts.winfo_children()):
+            self.tooltip.attach(w, m.card_id, extra)
 
 
 def main():

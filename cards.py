@@ -15,7 +15,9 @@ from pathlib import Path
 
 CACHE_FILE = Path(__file__).with_name("cards_cache.json")
 HSJSON_URL = "https://api.hearthstonejson.com/v1/latest/enUS/cards.json"
-CACHE_VERSION = 2
+CACHE_VERSION = 3
+
+TAG_RE = re.compile(r"</?[bi]>|\[x\]")
 
 RACE_LABELS = {
     "BEAST": "Beast",
@@ -72,7 +74,8 @@ class CardDb:
                     if "name" not in c:
                         continue
                     races = c.get("races") or ([c["race"]] if "race" in c else [])
-                    slim[c["id"]] = [c["name"], races]
+                    text = TAG_RE.sub("", c.get("text", "")).replace("\n", " ").strip()
+                    slim[c["id"]] = [c["name"], races, text, c.get("techLevel", 0)]
                 with self._lock:
                     self._cards = slim
                 CACHE_FILE.write_text(
@@ -119,6 +122,14 @@ class CardDb:
     def races(self, card_id: str) -> list:
         entry = self._entry(card_id)
         return entry[1] if entry else []
+
+    def text(self, card_id: str) -> str:
+        entry = self._entry(card_id)
+        return entry[2] if entry and len(entry) > 2 else ""
+
+    def tech_level(self, card_id: str) -> int:
+        entry = self._entry(card_id)
+        return entry[3] if entry and len(entry) > 3 else 0
 
     def tribe_label(self, minions) -> str:
         """Dominant tribe of a board, if one covers at least half of it."""
