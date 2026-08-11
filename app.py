@@ -248,7 +248,7 @@ class TrackerApp:
         self._caps: list[tuple[tk.Label, str]] = []
         self._detail_key = None
         self._detail_sel: tuple[int, int] | None = None  # (pid, history index)
-        self._highlight_pid: int | None = None
+        self._highlight_pids: set[int] = set()
         self._view = None  # latest data pulled from the parser
         self._last_click = 0.0  # manual pin/round clicks pause auto-select
         self._prev_next_opp = 0
@@ -340,6 +340,7 @@ class TrackerApp:
                 "teams": self.game.duo_teams(),
                 "own_board": self.game.friendly_board(),
                 "own_tier": self.game.friendly_tech_level(),
+                "own_extras": self.game._side_extras(self.game.friendly_controller),
                 "in_bg": self.game.is_battlegrounds,
                 "game_over": self.game.game_over,
             }
@@ -396,7 +397,7 @@ class TrackerApp:
             w.destroy()
         self._rows.clear()
         self._caps = []
-        self._highlight_pid = None
+        self._highlight_pids = set()
 
         teams = view["teams"]
         if teams:
@@ -431,10 +432,12 @@ class TrackerApp:
 
             block = tk.Frame(self.rows_frame, bg=BG)
             block.pack(fill="x", pady=1)
+            block.columnconfigure(0, weight=1, uniform="duo")
+            block.columnconfigure(1, weight=1, uniform="duo")
             members = [p for p in view["order"] if teams.get(p) == team]
             for j, pid in enumerate(members):
                 cell = tk.Frame(block, bg=BG_ROW, padx=6, pady=3)
-                cell.pack(side="left", fill="both", expand=True,
+                cell.grid(row=0, column=j, sticky="nsew",
                           padx=((0, 2) if j == 0 else (2, 0)))
                 left = tk.Label(cell, text="", bg=BG_ROW, fg=FG,
                                 font=("Segoe UI", 10), anchor="w")
@@ -566,22 +569,35 @@ class TrackerApp:
 
     def _update_highlight(self):
         shown = self._shown_pid()
-        if shown == self._highlight_pid:
+        group: set[int] = set()
+        if shown is not None:
+            teams = self._view["teams"] if self._view else {}
+            if teams and shown in teams:
+                group = {p for p in self._rows if teams.get(p) == teams[shown]}
+            else:
+                group = {shown}
+        if group == self._highlight_pids:
             return
-        for pid in (self._highlight_pid, shown):
+        for pid in self._highlight_pids | group:
             refs = self._rows.get(pid)
             if refs:
-                color = BG_HOVER if pid == shown else BG_ROW
+                color = BG_HOVER if pid in group else BG_ROW
                 refs["row"].configure(bg=color)
                 for child in refs["row"].winfo_children():
                     child.configure(bg=color)
-        self._highlight_pid = shown
+        self._highlight_pids = group
 
     def _update_detail(self):
         view = self._view
         if view is None:
             return
         pid = self._shown_pid()
+        teams = view["teams"]
+        if pid is not None and teams and pid in teams:
+            members = [p for p in view["order"] if teams.get(p) == teams[pid]]
+            if len(members) >= 2:
+                self._update_detail_team(view, members)
+                return
         hist = view["history"].get(pid, []) if pid is not None else []
         if self._detail_sel and self._detail_sel[0] == pid and self._detail_sel[1] < len(hist):
             idx = self._detail_sel[1]
@@ -660,27 +676,143 @@ class TrackerApp:
             ).pack(fill="x", padx=4)
             return
         for m in snap.minions:
-            self._minion_row(m)
+            self._minion_row(self.detail, m)
+
+    # ------------------------------------------------------- duos team detail
+
+    def _update_detail_team(self, view, members):
+        """Both boards of a duos team side by side."""
+        cols = []
+        for p in members:
+            if p == view["friendly"]:
+                cols.append((p, None, -1))  # live board, no history
+                continue
+            hist = view["history"].get(p, [])
+            if self._detail_sel and self._detail_sel[0] == p and self._detail_sel[1] < len(hist):
+                idx = self._detail_sel[1]
+            else:
+                idx = len(hist) - 1
+            cols.append((p, hist[idx] if hist else None, idx))
+        key = (
+            "team",
+            self.pinned_pid,
+            tuple((p, idx, id(s), s.result if s else "") for p, s, idx in cols),
+            len(view["own_board"]) if any(p == view["friendly"] for p, _, _ in cols) else -1,
+        )
+        if key == self._detail_key:
+            return
+        self._detail_key = key
+        self.tooltip.hide()
+        for w in self.detail.winfo_children():
+            w.destroy()
+
+        names = " & ".join(
+            (view["heroes"][p].name or self.cards.name(view["heroes"][p].card_id))
+            for p, _, _ in cols
+            if p in view["heroes"]
+        )
+        pin_mark = " 📌" if self.pinned_pid in [p for p, _, _ in cols] else ""
+        self.detail_title.configure(text=names + pin_mark)
+
+        grid = tk.Frame(self.detail, bg=BG)
+        grid.pack(fill="both", expand=True)
+        grid.columnconfigure(0, weight=1, uniform="boards")
+        grid.columnconfigure(1, weight=1, uniform="boards")
+        for j, (p, snap, idx) in enumerate(cols):
+            col = tk.Frame(grid, bg=BG)
+            col.grid(row=0, column=j, sticky="new", padx=((0, 3) if j == 0 else (3, 0)))
+            self._board_column(col, view, p, snap, idx)
+
+    def _board_column(self, col, view, pid, snap, idx):
+        hero = view["heroes"].get(pid)
+        hero_name = (hero.name if hero else "") or (
+            self.cards.name(hero.card_id) if hero else "?"
+        )
+        is_self = pid == view["friendly"]
+        tk.Label(
+            col, text=hero_name + (" (you)" if is_self else ""), bg=BG, fg=FG,
+            font=("Segoe UI", 9, "bold"), anchor="w",
+        ).pack(fill="x")
+
+        if is_self:
+            trinkets, hero_power = view["own_extras"]
+            minions = view["own_board"]
+            sub = "live board"
+        elif snap is None:
+            tk.Label(col, text="no board seen yet", bg=BG, fg=FG_DIM,
+                     font=("Segoe UI", 8), anchor="w").pack(fill="x")
+            return
+        else:
+            trinkets, hero_power = snap.trinkets, snap.hero_power
+            minions = snap.minions
+            bits = [f"r{snap.round_num}"]
+            if snap.tech_level:
+                bits.append(f"T{snap.tech_level}")
+            bits.append({
+                "win": f"you won (+{snap.result_dmg})",
+                "loss": f"you lost (-{snap.result_dmg})",
+                "tie": "tied",
+            }.get(snap.result, ""))
+            sub = " · ".join(b for b in bits if b)
+        tk.Label(col, text=sub, bg=BG, fg=FG_DIM,
+                 font=("Segoe UI", 8), anchor="w").pack(fill="x")
+
+        extras = tk.Frame(col, bg=BG)
+        extras.pack(fill="x")
+        hoverables = []
+        if hero_power:
+            hoverables.append(("⚡ " + self.cards.name(hero_power), hero_power))
+        for t in trinkets:
+            hoverables.append(("🎁 " + self.cards.name(t), t))
+        for text, cid in hoverables:
+            lbl = tk.Label(extras, text=text, bg=BG, fg=FG_DIM,
+                           font=("Segoe UI", 8, "underline"), anchor="w")
+            lbl.pack(fill="x")
+            self.tooltip.attach(lbl, cid)
+
+        if not is_self:
+            hist = view["history"].get(pid, [])
+            if len(hist) > 1:
+                chips = tk.Frame(col, bg=BG)
+                chips.pack(fill="x", pady=(1, 2))
+                for i, s in enumerate(hist):
+                    mark = {"win": "＋", "loss": "－", "tie": "＝"}.get(s.result, "")
+                    lbl = tk.Label(
+                        chips, text=f"r{s.round_num}{mark}",
+                        bg=BG_HOVER if i == idx else BG_ROW,
+                        fg=FG if i == idx else FG_DIM,
+                        font=("Segoe UI", 7, "bold" if i == idx else "normal"),
+                        padx=3, pady=0,
+                    )
+                    lbl.pack(side="left", padx=(0, 2))
+                    lbl.bind("<Button-1>", lambda _e, p=pid, j=i: self._select_round(p, j))
+
+        if not minions:
+            tk.Label(col, text="(empty board)", bg=BG, fg=FG_DIM,
+                     font=("Segoe UI", 8), anchor="w").pack(fill="x")
+        for m in minions:
+            self._minion_row(col, m, art_w=105)
 
     ART_W = 150  # right part of the tile shown; the left fade is clipped off
 
-    def _minion_row(self, m):
+    def _minion_row(self, parent, m, art_w=None):
+        aw = art_w or self.ART_W
         h = TILE_H + 2
-        row = tk.Frame(self.detail, bg=BG_ROW, height=h)
-        row.pack(fill="x", padx=4, pady=1)
+        row = tk.Frame(parent, bg=BG_ROW, height=h)
+        row.pack(fill="x", padx=(2 if art_w else 4), pady=1)
         row.pack_propagate(False)
         if m.golden:
             row.configure(
                 highlightbackground=GOLD, highlightcolor=GOLD, highlightthickness=1
             )
 
-        c = tk.Canvas(row, width=self.ART_W, height=h, bg=BG_ROW, highlightthickness=0)
+        c = tk.Canvas(row, width=aw, height=h, bg=BG_ROW, highlightthickness=0)
         c.pack(side="right")
         tile = self.art.get_tile(m.card_id)
         if tile is not None:
             # Right-anchored: the tile's white left fade hangs past the
             # canvas edge and gets clipped.
-            c.create_image(self.ART_W, h // 2, image=tile, anchor="e")
+            c.create_image(aw, h // 2, image=tile, anchor="e")
             c.image = tile  # keep a reference or tk garbage-collects it
             # Screen-door blend so the art edge doesn't cut hard.
             for width, stipple in ((26, "gray25"), (18, "gray50"), (9, "gray75")):
@@ -690,11 +822,11 @@ class TrackerApp:
         stats = f"{m.attack}/{m.health}"
         sw = 7 * len(stats) + 10
         c.create_rectangle(
-            self.ART_W - sw - 2, h - 18, self.ART_W - 2, h - 3,
+            aw - sw - 2, h - 18, aw - 2, h - 3,
             fill="#101014", outline="#000",
         )
         c.create_text(
-            self.ART_W - 2 - sw / 2, h - 10, text=stats,
+            aw - 2 - sw / 2, h - 10, text=stats,
             fill=GOLD if m.golden else "#ffffff", font=("Consolas", 9, "bold"),
         )
 
