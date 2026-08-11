@@ -250,11 +250,13 @@ class TrackerApp:
         self._detail_sel: tuple[int, int] | None = None  # (pid, history index)
         self._highlight_pid: int | None = None
         self._view = None  # latest data pulled from the parser
+        self._last_click = 0.0  # manual pin/round clicks pause auto-select
+        self._prev_next_opp = 0
 
         root.title("BG Tracker")
         root.configure(bg=BG)
-        root.geometry("340x520")
-        root.minsize(280, 320)
+        root.geometry("520x600")
+        root.minsize(360, 320)
         root.attributes("-topmost", True)
 
         self._build_ui()
@@ -363,6 +365,22 @@ class TrackerApp:
             order = sorted(view["heroes"])
         view["order"] = order
 
+        # Auto-select the upcoming opponent when it changes, unless the user
+        # clicked something in the last couple of seconds.
+        nxt = view["next_opp"]
+        if (
+            nxt
+            and nxt != self._prev_next_opp
+            and nxt in view["heroes"]
+            and nxt != view["friendly"]
+            and not (view["teammate"] and nxt == view["teammate"])
+            and time.time() - self._last_click > 2
+        ):
+            self.pinned_pid = nxt
+            self._detail_sel = None
+        if nxt:
+            self._prev_next_opp = nxt
+
         structure = (tuple(order), tuple(teams.get(p) for p in order))
         if structure != self._structure:
             self._structure = structure
@@ -381,19 +399,10 @@ class TrackerApp:
         self._highlight_pid = None
 
         teams = view["teams"]
-        prev_team = None
-        first = True
+        if teams:
+            self._build_rows_duos(view)
+            return
         for pid in view["order"]:
-            team = teams.get(pid)
-            if teams and team != prev_team:
-                cap = tk.Frame(self.rows_frame, bg=BG)
-                cap.pack(fill="x", pady=((0, 0) if first else (6, 0)))
-                lbl = tk.Label(cap, text="", bg=BG, fg=FG_DIM,
-                               font=("Segoe UI", 8), anchor="e")
-                lbl.pack(side="right", padx=2)
-                self._caps.append((lbl, team))
-            prev_team = team
-
             row = tk.Frame(self.rows_frame, bg=BG_ROW, padx=6, pady=3)
             row.pack(fill="x", pady=1)
             left = tk.Label(row, text="", bg=BG_ROW, fg=FG,
@@ -401,13 +410,47 @@ class TrackerApp:
             left.pack(side="left")
             right = tk.Label(row, text="", bg=BG_ROW, fg=FG_DIM, font=("Segoe UI", 8))
             right.pack(side="right")
-
-            if pid != view["friendly"]:
-                for w in (row, left, right):
-                    w.bind("<Enter>", lambda _e, p=pid: self._hover(p))
-                    w.bind("<Button-1>", lambda _e, p=pid: self._pin(p))
+            self._bind_row(pid, view, row, left, right)
             self._rows[pid] = {"row": row, "left": left, "right": right, "cache": None}
-            first = False
+
+    def _build_rows_duos(self, view):
+        """One block per team: Σ caption on top, both heroes side by side."""
+        teams = view["teams"]
+        seen = []
+        for pid in view["order"]:
+            team = teams.get(pid)
+            if team not in seen:
+                seen.append(team)
+        for i, team in enumerate(seen):
+            cap = tk.Frame(self.rows_frame, bg=BG)
+            cap.pack(fill="x", pady=((0, 0) if i == 0 else (5, 0)))
+            lbl = tk.Label(cap, text="", bg=BG, fg=FG_DIM,
+                           font=("Segoe UI", 8), anchor="e")
+            lbl.pack(side="right", padx=2)
+            self._caps.append((lbl, team))
+
+            block = tk.Frame(self.rows_frame, bg=BG)
+            block.pack(fill="x", pady=1)
+            members = [p for p in view["order"] if teams.get(p) == team]
+            for j, pid in enumerate(members):
+                cell = tk.Frame(block, bg=BG_ROW, padx=6, pady=3)
+                cell.pack(side="left", fill="both", expand=True,
+                          padx=((0, 2) if j == 0 else (2, 0)))
+                left = tk.Label(cell, text="", bg=BG_ROW, fg=FG,
+                                font=("Segoe UI", 10), anchor="w")
+                left.pack(fill="x")
+                right = tk.Label(cell, text="", bg=BG_ROW, fg=FG_DIM,
+                                 font=("Segoe UI", 8), anchor="w")
+                right.pack(fill="x")
+                self._bind_row(pid, view, cell, left, right)
+                self._rows[pid] = {"row": cell, "left": left, "right": right, "cache": None}
+
+    def _bind_row(self, pid, view, *widgets):
+        if pid == view["friendly"]:
+            return
+        for w in widgets:
+            w.bind("<Enter>", lambda _e, p=pid: self._hover(p))
+            w.bind("<Button-1>", lambda _e, p=pid: self._pin(p))
 
     def _team_sum(self, view, team) -> str:
         atk = hp = 0
@@ -445,7 +488,13 @@ class TrackerApp:
             is_self = pid == view["friendly"]
             is_teammate = view["teammate"] and pid == view["teammate"]
             is_opponent = not is_self and not is_teammate
-            is_next = pid == view["next_opp"] and is_opponent
+            nxt = view["next_opp"]
+            teams = view["teams"]
+            # In duos you fight the whole team — mark both members.
+            is_next = is_opponent and (
+                pid == nxt
+                or (bool(teams) and nxt in teams and teams.get(pid) == teams[nxt])
+            )
             snap = view["snapshots"].get(pid)
 
             hero_name = hero.name or self.cards.name(hero.card_id)
@@ -501,12 +550,14 @@ class TrackerApp:
                 self._update_detail()
 
     def _pin(self, pid: int):
+        self._last_click = time.time()
         self.pinned_pid = None if self.pinned_pid == pid else pid
         self._detail_sel = None
         self._update_highlight()
         self._update_detail()
 
     def _select_round(self, pid: int, idx: int):
+        self._last_click = time.time()
         self._detail_sel = (pid, idx)
         self._update_detail()
 
