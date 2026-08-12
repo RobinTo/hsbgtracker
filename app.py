@@ -41,6 +41,23 @@ TRIBE_ICONS = {
 }
 
 
+def set_app_identity(root: tk.Tk):
+    """Own taskbar identity + icon, so the tracker doesn't group with other
+    pythonw windows and a pinned shortcut points at it cleanly."""
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("hstracker.bg")
+    except Exception:
+        pass
+    ico = Path(__file__).with_name("icon.ico")
+    if ico.exists():
+        try:
+            root.iconbitmap(str(ico))
+        except tk.TclError:
+            pass
+
+
 def enable_dark_titlebar(root: tk.Tk):
     """Ask DWM for a dark title bar (Windows 10 1809+; silently no-op elsewhere)."""
     try:
@@ -296,6 +313,7 @@ class TrackerApp:
         root.geometry(self._load_geometry() or "520x600")
         root.minsize(360, 320)
         root.attributes("-topmost", True)
+        set_app_identity(root)
         enable_dark_titlebar(root)
 
         self._build_ui()

@@ -4,3 +4,4 @@ images_cache/
 tracker_config.json
 games_history.jsonl
 tests/data/
+*.lnk
