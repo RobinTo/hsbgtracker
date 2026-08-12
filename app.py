@@ -333,7 +333,23 @@ class TrackerApp:
             self.status.set(f"Watching {logs_dir}")
             LogTailer(logs_dir, self.game, self.lock, self.dirty.set).start()
 
+        import live_server
+        import stats_page
+
+        self._server = live_server.start(
+            self._live_state, lambda: stats_page.build_html(self.cards)
+        )
+
         self._poll()
+
+    def _live_state(self):
+        with self.lock:
+            return {
+                "in_game": self.game.is_battlegrounds and not self.game.game_over,
+                "round": self.game.turn,
+                "mode": "duos" if self.game.is_duos else "solo",
+                "game_over": self.game.game_over,
+            }
 
     # ------------------------------------------------------- window geometry
 
@@ -800,9 +816,16 @@ class TrackerApp:
     def _open_stats(self):
         def work():
             try:
-                import stats_page
+                if self._server is not None:
+                    import webbrowser
 
-                stats_page.build(open_browser=True)
+                    from live_server import PORT
+
+                    webbrowser.open(f"http://127.0.0.1:{PORT}/")
+                else:
+                    import stats_page
+
+                    stats_page.build(open_browser=True, cards=self.cards)
             except Exception:
                 pass
 

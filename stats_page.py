@@ -21,8 +21,9 @@ TEMPLATE = Path(__file__).with_name("stats_template.html")
 OUTPUT = Path(__file__).with_name("stats.html")
 
 
-def build(open_browser: bool = False) -> Path:
-    cards = CardDb()
+def build_html(cards: CardDb | None = None) -> str:
+    """Compose the dashboard HTML with fresh data embedded."""
+    cards = cards or CardDb()
     records = []
     for g in load_games():
         snaps = own_snaps(g)
@@ -73,10 +74,13 @@ def build(open_browser: bool = False) -> Path:
         "generated": time.strftime("%Y-%m-%d %H:%M"),
         "games": records,
     }
-    html = TEMPLATE.read_text(encoding="utf-8").replace(
+    return TEMPLATE.read_text(encoding="utf-8").replace(
         "/*__DATA__*/", json.dumps(data, ensure_ascii=False).replace("<", "\\u003c")
     )
-    OUTPUT.write_text(html, encoding="utf-8")
+
+
+def build(open_browser: bool = False, cards: CardDb | None = None) -> Path:
+    OUTPUT.write_text(build_html(cards), encoding="utf-8")
     if open_browser:
         webbrowser.open(OUTPUT.as_uri())
     return OUTPUT

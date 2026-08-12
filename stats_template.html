@@ -102,12 +102,18 @@
       <div id="roundrec"></div>
     </div>
     <div class="card">
-      <h2>Minions most seen in winning fights</h2>
+      <h2>Minions in winning final boards <span style="color:var(--muted);font-weight:400">(#1 finishes)</span></h2>
       <div id="winMinions"></div>
     </div>
     <div class="card">
-      <h2>Minions most seen in losing fights</h2>
+      <h2>Minions in bottom-half final boards</h2>
       <div id="lossMinions"></div>
+    </div>
+    <div class="card wide">
+      <h2>Winning minions by round
+        <span id="liveBadge" style="color:var(--muted);font-weight:400"></span></h2>
+      <div class="filters" id="roundChips" style="margin:0 0 10px"></div>
+      <div id="roundMinions"></div>
     </div>
     <div class="card wide">
       <h2>Match history <span style="color:var(--muted);font-weight:400">(click a row for the final board)</span></h2>
@@ -308,19 +314,110 @@ function renderRoundRecord(gs) {
 }
 
 function renderMinions(gs) {
+  // Final boards only: #1 finishes vs bottom-half finishes.
   const win = new Map(), loss = new Map();
-  for (const g of gs) for (const f of g.fights) {
-    const m = f.res === "win" ? win : f.res === "loss" ? loss : null;
-    if (!m) continue;
-    for (const name of f.board) m.set(name, (m.get(name) || 0) + 1);
+  for (const g of gs) {
+    if (!g.place || !g.finalBoard.length) continue;
+    const bottom = g.place > (g.mode === "duos" ? 2 : 4);
+    const bucket = g.place === 1 ? win : bottom ? loss : null;
+    if (!bucket) continue;
+    for (const m of g.finalBoard) bucket.set(m.n, (bucket.get(m.n) || 0) + 1);
   }
   const top = m => [...m.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8)
     .map(([label, value]) => ({ label, value }));
   renderBars("winMinions", top(win), S1,
-    r => [`${r.value}×`, `${r.label} — appearances in winning fights`], String);
+    r => [`${r.value}×`, `${r.label} — in #1 final boards`], String);
   renderBars("lossMinions", top(loss), S2,
-    r => [`${r.value}×`, `${r.label} — appearances in losing fights`], String);
+    r => [`${r.value}×`, `${r.label} — in bottom-half final boards`], String);
 }
+
+// ------------------------------------------------- winning minions by round
+let liveRound = null;      // round reported by the tracker, when reachable
+let manualRound = null;    // set by clicking a chip; null = follow live
+let selectedRound = null;
+
+function roundsWithData(gs) {
+  const set = new Set();
+  for (const g of gs) for (const f of g.fights)
+    if (f.res === "win" || f.res === "loss") set.add(f.r);
+  return [...set].sort((a, b) => a - b);
+}
+
+function renderRoundMinions(gs) {
+  const rounds = roundsWithData(gs);
+  const chipBox = document.getElementById("roundChips");
+  chipBox.replaceChildren();
+  const badge = document.getElementById("liveBadge");
+  if (!rounds.length) {
+    badge.textContent = "";
+    document.getElementById("roundMinions").replaceChildren(
+      Object.assign(document.createElement("div"), { className: "empty", textContent: "No recorded fights yet." }));
+    return;
+  }
+  selectedRound = manualRound ?? (
+    liveRound && rounds.includes(liveRound) ? liveRound
+    : liveRound ? rounds.reduce((a, b) => Math.abs(b - liveRound) < Math.abs(a - liveRound) ? b : a)
+    : rounds[rounds.length - 1]);
+
+  const liveChip = document.createElement("button");
+  liveChip.textContent = liveRound ? `● live r${liveRound}` : "● live";
+  liveChip.disabled = !liveRound;
+  liveChip.classList.toggle("on", manualRound === null && !!liveRound);
+  liveChip.style.color = liveRound ? "#0ca30c" : "var(--muted)";
+  liveChip.addEventListener("click", () => { manualRound = null; render(); });
+  chipBox.appendChild(liveChip);
+  for (const r of rounds) {
+    const b = document.createElement("button");
+    b.textContent = "r" + r;
+    b.classList.toggle("on", r === selectedRound);
+    b.addEventListener("click", () => { manualRound = r; render(); });
+    chipBox.appendChild(b);
+  }
+
+  const wins = new Map(), seen = new Map();
+  for (const g of gs) for (const f of g.fights) {
+    if (f.r !== selectedRound) continue;
+    if (f.res !== "win" && f.res !== "loss") continue;
+    for (const name of f.board) {
+      seen.set(name, (seen.get(name) || 0) + 1);
+      if (f.res === "win") wins.set(name, (wins.get(name) || 0) + 1);
+    }
+  }
+  const rows = [...seen.entries()]
+    .map(([label, n]) => ({ label, value: wins.get(label) || 0, note: `of ${n}` }))
+    .filter(r => r.value > 0)
+    .sort((a, b) => b.value - a.value)
+    .slice(0, 10);
+  const box = document.getElementById("roundMinions");
+  if (!rows.length) {
+    box.replaceChildren(Object.assign(document.createElement("div"),
+      { className: "empty", textContent: `No winning fights recorded at round ${selectedRound} yet.` }));
+    return;
+  }
+  renderBars("roundMinions", rows, S1,
+    r => [`won ${r.value} fight(s)`, `${r.label} — appeared in ${r.note.slice(3)} round-${selectedRound} fight(s)`],
+    String);
+}
+
+// ------------------------------------------------------------- live polling
+const STATE_URL = location.protocol === "file:"
+  ? "http://127.0.0.1:8765/state" : "/state";
+async function pollLive() {
+  try {
+    const r = await fetch(STATE_URL, { cache: "no-store" });
+    const s = await r.json();
+    const newRound = s.in_game ? s.round : null;
+    if (newRound !== liveRound) {
+      liveRound = newRound;
+      if (manualRound === null) render();
+      else renderRoundMinions(games());  // refresh the badge only
+    }
+  } catch (_e) {
+    if (liveRound !== null) { liveRound = null; render(); }
+  }
+}
+setInterval(pollLive, 2000);
+pollLive();
 
 // -------------------------------------------------------------------- table
 function sparkline(hp) {
@@ -393,6 +490,7 @@ function render() {
   renderTribes(gs);
   renderRoundRecord(gs);
   renderMinions(gs);
+  renderRoundMinions(gs);
   renderTable(gs);
 }
 render();
