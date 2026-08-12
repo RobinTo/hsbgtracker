@@ -47,12 +47,16 @@ class ArtStore:
     def get_tile(self, card_id: str) -> tk.PhotoImage | None:
         return self._get("tiles", TILE_URL, card_id, scale=(TILE_ZOOM, TILE_SUB))
 
+    def get_tile_small(self, card_id: str) -> tk.PhotoImage | None:
+        """Half-size tile (128x29) for roster rows."""
+        return self._get("tiles", TILE_URL, card_id, scale=(1, 2), variant="s")
+
     def get_render(self, card_id: str) -> tk.PhotoImage | None:
         return self._get("renders", RENDER_URL, card_id, scale=None)
 
-    def _get(self, kind, url_tpl, card_id, scale):
+    def _get(self, kind, url_tpl, card_id, scale, variant=""):
         aid = _art_id(card_id)
-        key = (kind, aid)
+        key = (kind + variant, aid)
         if key in self._photos:
             return self._photos[key]
         path = CACHE_DIR / kind / f"{aid}.png"

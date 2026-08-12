@@ -92,6 +92,7 @@ class Snapshot:
     armor: int = 0
     trinkets: list = field(default_factory=list)  # card ids
     hero_power: str = ""  # card id
+    buddy_dbf: int = 0  # BACON_COMPANION_ID of the fighter's hero, if any
     # Outcome of that combat from OUR perspective, filled in after it ends:
     # "" (unknown) | "win" | "loss" | "tie";  result_dmg = hp swing
     result: str = ""
@@ -109,6 +110,18 @@ class BgGame:
         self._reset()
 
     def _reset(self):
+        # A reconnect mid-game produces a fresh CREATE_GAME whose first TURN
+        # value is > 1; stash per-player data so it can be carried over.
+        carry = None
+        if getattr(self, "is_battlegrounds", False) and not getattr(self, "game_over", True):
+            carry = {
+                "history": self.history,
+                "snapshots": self.snapshots,
+                "names": self.player_names,
+                "hp_track": self.hp_track,
+            }
+        self._carryover = carry
+        self._first_turn_seen = False
         self.entities: dict[int, Entity] = {}
         self.player_names: dict[int, str] = {}  # lobby player id -> battletag
         self.friendly_controller = 0
@@ -132,6 +145,8 @@ class BgGame:
         self._pending_friendly_swap = 0
         self.snapshots: dict[int, Snapshot] = {}  # latest per player
         self.history: dict[int, list] = {}  # all snapshots per player, in order
+        self.hp_track: list[tuple[int, int]] = []  # (round, our effective hp)
+        self.anomaly_dbf = 0
         self._combat_snaps: list[Snapshot] = []  # taken during current combat
         self._combat_pre = None  # (our_hp, enemy_hp) at combat start
         self.is_battlegrounds = False
@@ -306,11 +321,30 @@ class BgGame:
             if ent.tag("PLAYER_ID") == self.friendly_controller and str(value).isdigit():
                 self.teammate_id = int(value)
         elif tag == "TURN" and value.isdigit():
-            self.turn = int(value)
+            v = int(value)
+            if not self._first_turn_seen:
+                self._first_turn_seen = True
+                if v > 1 and self._carryover:
+                    # Reconnect into an ongoing game: merge the stashed data
+                    # (player ids are stable across the reconnect).
+                    carry = self._carryover
+                    for pid, snaps in carry["history"].items():
+                        self.history[pid] = snaps + self.history.get(pid, [])
+                    for pid, snap in carry["snapshots"].items():
+                        self.snapshots.setdefault(pid, snap)
+                    for pid, nm in carry["names"].items():
+                        self.player_names.setdefault(pid, nm)
+                    self.hp_track = carry["hp_track"] + self.hp_track
+                self._carryover = None
+            self.turn = v
         elif tag == "STEP":
             self._on_step(value)
+        elif tag == "BACON_GLOBAL_ANOMALY_DBID" and str(value).isdigit():
+            self.anomaly_dbf = int(value)
         elif tag == "STATE" and value == "COMPLETE":
             self.game_over = True
+            # The final combat has no following shopping turn; settle it now.
+            self._resolve_combat_result()
 
     @staticmethod
     def _intval(value: str):
@@ -348,7 +382,10 @@ class BgGame:
 
             fpid = self._pending_combat_friendly
             self._last_friendly_pid = fpid
-            if fpid and fpid == self.teammate_id:
+            # Snapshot our own side too (whoever leads it — us or, in duos,
+            # our teammate); this builds the per-combat record of our own
+            # boards used by the stats history.
+            if fpid:
                 if self._board(self.friendly_controller):
                     self._take_snapshot(fpid, friendly_side=True)
                 else:
@@ -395,8 +432,7 @@ class BgGame:
             self._last_combat_pid = self._pending_swap
             self._pending_swap = 0
         if self._pending_friendly_swap:
-            if self._pending_friendly_swap == self.teammate_id:
-                self._take_snapshot(self._pending_friendly_swap, friendly_side=True)
+            self._take_snapshot(self._pending_friendly_swap, friendly_side=True)
             self._last_friendly_pid = self._pending_friendly_swap
             self._pending_friendly_swap = 0
 
@@ -430,6 +466,7 @@ class BgGame:
         for snap in self._combat_snaps:
             snap.result = result
             snap.result_dmg = dmg
+        self.hp_track.append((self.turn, self._pid_hp(self.friendly_controller)))
         self._combat_pre = None
         self._combat_snaps = []
 
@@ -503,6 +540,7 @@ class BgGame:
             armor=status.get("armor", 0),
             trinkets=trinkets,
             hero_power=hero_power,
+            buddy_dbf=(hero.tag("BACON_COMPANION_ID", 0) or 0) if hero else 0,
             minions=[self._minion(e) for e in board],
         )
         self.snapshots[opponent_id] = snap

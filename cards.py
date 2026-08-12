@@ -1,4 +1,4 @@
-"""Card-ID -> display-name / races lookup.
+"""Card-ID -> name / races / text / stats lookup.
 
 Primary source is HearthstoneJSON (downloaded once, slimmed and cached next
 to this file). Names observed in Power.log itself are merged in as a
@@ -15,7 +15,7 @@ from pathlib import Path
 
 CACHE_FILE = Path(__file__).with_name("cards_cache.json")
 HSJSON_URL = "https://api.hearthstonejson.com/v1/latest/enUS/cards.json"
-CACHE_VERSION = 3
+CACHE_VERSION = 4
 
 TAG_RE = re.compile(r"</?[bi]>|\[x\]")
 
@@ -36,7 +36,9 @@ RACE_LABELS = {
 
 class CardDb:
     def __init__(self):
-        self._cards: dict[str, list] = {}  # id -> [name, [races]]
+        # id -> [name, races, text, techLevel, attack, health]
+        self._cards: dict[str, list] = {}
+        self._dbf: dict[str, str] = {}  # str(dbfId) -> card id
         self._learned: dict[str, str] = {}
         self._lock = threading.Lock()
         self._load_cache()
@@ -51,6 +53,7 @@ class CardDb:
             if isinstance(data, dict) and data.get("v") == CACHE_VERSION:
                 with self._lock:
                     self._cards = data["cards"]
+                    self._dbf = data.get("dbf", {})
         except (OSError, json.JSONDecodeError, KeyError):
             pass
 
@@ -70,16 +73,26 @@ class CardDb:
                 with urllib.request.urlopen(req, timeout=60) as resp:
                     cards = json.load(resp)
                 slim = {}
+                dbf = {}
                 for c in cards:
                     if "name" not in c:
                         continue
                     races = c.get("races") or ([c["race"]] if "race" in c else [])
                     text = TAG_RE.sub("", c.get("text", "")).replace("\n", " ").strip()
-                    slim[c["id"]] = [c["name"], races, text, c.get("techLevel", 0)]
+                    slim[c["id"]] = [
+                        c["name"], races, text, c.get("techLevel", 0),
+                        c.get("attack", 0), c.get("health", 0),
+                    ]
+                    if "dbfId" in c:
+                        dbf[str(c["dbfId"])] = c["id"]
                 with self._lock:
                     self._cards = slim
+                    self._dbf = dbf
                 CACHE_FILE.write_text(
-                    json.dumps({"v": CACHE_VERSION, "cards": slim}, ensure_ascii=False),
+                    json.dumps(
+                        {"v": CACHE_VERSION, "cards": slim, "dbf": dbf},
+                        ensure_ascii=False,
+                    ),
                     encoding="utf-8",
                 )
                 ok = True
@@ -130,6 +143,24 @@ class CardDb:
     def tech_level(self, card_id: str) -> int:
         entry = self._entry(card_id)
         return entry[3] if entry and len(entry) > 3 else 0
+
+    def base_stats(self, card_id: str) -> tuple[int, int] | None:
+        """Printed attack/health. Golden ids resolve to their own (doubled)
+        entry when present; otherwise the base entry is doubled here."""
+        with self._lock:
+            entry = self._cards.get(card_id)
+            if entry is None and card_id.endswith("_G"):
+                base = self._cards.get(card_id.removesuffix("_G"))
+                if base and len(base) > 5:
+                    return base[4] * 2, base[5] * 2
+                return None
+        if entry and len(entry) > 5:
+            return entry[4], entry[5]
+        return None
+
+    def card_by_dbf(self, dbf_id: int) -> str:
+        with self._lock:
+            return self._dbf.get(str(dbf_id), "")
 
     def tribe_label(self, minions) -> str:
         """Dominant tribe of a board, if one covers at least half of it."""

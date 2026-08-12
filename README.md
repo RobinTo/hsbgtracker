@@ -58,6 +58,26 @@ pythonw app.py
 Boards are captured at the *start* of each combat, before any attacks
 resolve — i.e. the board exactly as the opponent built it.
 
+## Recap, history, stats
+
+- When a game ends the pane shows a recap (HP graph + placements); the
+  "📊 recap" button or Escape brings it back after hovering elsewhere
+- Every finished game is appended to `games_history.jsonl` (including your
+  own board from every combat)
+- `python stats.py` reports average placement, placement by final-board
+  tribe, and the minions most common in your winning vs losing fights
+
+## Keyboard
+
+Up/Down cycle players · Left/Right cycle a player's recorded rounds ·
+Escape back to default view / recap
+
+## Tests
+
+`python tests/test_replay.py` replays stored logs in `tests/data/`
+(machine-local, not committed) and asserts known-good snapshots, results,
+and placements.
+
 ## Files
 
 - `app.py` — tkinter UI + Power.log tailer (auto-detects the install from

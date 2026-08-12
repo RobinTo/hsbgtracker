@@ -8,8 +8,11 @@ Run:  pythonw app.py [WxH+X+Y]
 
 from __future__ import annotations
 
+import hashlib
+import json
 import threading
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 import tkinter as tk
@@ -19,6 +22,40 @@ from images import ArtStore, TILE_H, TILE_W
 from parser import BgGame
 
 POLL_SECONDS = 1.0
+CONFIG_FILE = Path(__file__).with_name("tracker_config.json")
+HISTORY_FILE = Path(__file__).with_name("games_history.jsonl")
+
+TRIBE_ICONS = {
+    "Beast": "🐾",
+    "Demon": "😈",
+    "Dragon": "🐉",
+    "Elemental": "🔥",
+    "Mech": "⚙",
+    "Murloc": "🐟",
+    "Naga": "🐍",
+    "Pirate": "☠",
+    "Quilboar": "🐗",
+    "Undead": "💀",
+    "Amalgam": "🧬",
+    "Mixed": "✚",
+}
+
+
+def enable_dark_titlebar(root: tk.Tk):
+    """Ask DWM for a dark title bar (Windows 10 1809+; silently no-op elsewhere)."""
+    try:
+        import ctypes
+
+        root.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
+        value = ctypes.c_int(1)
+        for attr in (20, 19):  # DWMWA_USE_IMMERSIVE_DARK_MODE old/new builds
+            if ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, attr, ctypes.byref(value), 4
+            ) == 0:
+                break
+    except Exception:
+        pass
 
 BG = "#1e1f22"
 BG_ROW = "#26272b"
@@ -252,14 +289,24 @@ class TrackerApp:
         self._view = None  # latest data pulled from the parser
         self._last_click = 0.0  # manual pin/round clicks pause auto-select
         self._prev_next_opp = 0
+        self._recap_shown = False
 
         root.title("BG Tracker")
         root.configure(bg=BG)
-        root.geometry("520x600")
+        root.geometry(self._load_geometry() or "520x600")
         root.minsize(360, 320)
         root.attributes("-topmost", True)
+        enable_dark_titlebar(root)
 
         self._build_ui()
+        self._geom_save_job = None
+        root.bind("<Configure>", self._on_configure)
+        root.protocol("WM_DELETE_WINDOW", self._on_close)
+        root.bind("<Escape>", lambda _e: self._clear_selection())
+        root.bind("<Up>", lambda _e: self._nav_player(-1))
+        root.bind("<Down>", lambda _e: self._nav_player(1))
+        root.bind("<Left>", lambda _e: self._nav_round(-1))
+        root.bind("<Right>", lambda _e: self._nav_round(1))
 
         logs_dir = find_logs_dir()
         if logs_dir is None:
@@ -270,6 +317,69 @@ class TrackerApp:
 
         self._poll()
 
+    # ------------------------------------------------------- window geometry
+
+    @staticmethod
+    def _load_geometry() -> str | None:
+        try:
+            cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            return cfg.get("geometry")
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def _save_geometry(self):
+        self._geom_save_job = None
+        try:
+            CONFIG_FILE.write_text(
+                json.dumps({"geometry": self.root.geometry()}), encoding="utf-8"
+            )
+        except OSError:
+            pass
+
+    def _on_configure(self, event):
+        if event.widget is not self.root:
+            return
+        if self._geom_save_job is not None:
+            self.root.after_cancel(self._geom_save_job)
+        self._geom_save_job = self.root.after(1500, self._save_geometry)
+
+    def _on_close(self):
+        self._save_geometry()
+        self.root.destroy()
+
+    # ---------------------------------------------------- keyboard navigation
+
+    def _nav_player(self, delta: int):
+        view = self._view
+        if not view or not view.get("order"):
+            return
+        order = view["order"]
+        cur = self._shown_pid()
+        try:
+            i = order.index(cur)
+        except ValueError:
+            i = -delta if delta > 0 else 0
+        pid = order[(i + delta) % len(order)]
+        self._last_click = time.time()
+        self.pinned_pid = pid
+        self._detail_sel = None
+        self._update_highlight()
+        self._update_detail()
+
+    def _nav_round(self, delta: int):
+        view = self._view
+        pid = self._shown_pid()
+        if not view or pid is None:
+            return
+        hist = view["history"].get(pid, [])
+        if len(hist) < 2:
+            return
+        if self._detail_sel and self._detail_sel[0] == pid:
+            idx = self._detail_sel[1]
+        else:
+            idx = len(hist) - 1
+        self._select_round(pid, max(0, min(len(hist) - 1, idx + delta)))
+
     # -------------------------------------------------------------------- UI
 
     def _build_ui(self):
@@ -278,6 +388,10 @@ class TrackerApp:
         tk.Label(top, text="Opponents", bg=BG, fg=FG, font=("Segoe UI", 11, "bold")).pack(
             side="left"
         )
+        self.recap_btn = tk.Label(top, text="📊 recap", bg=BG, fg=FG_DIM,
+                                  font=("Segoe UI", 8, "underline"), cursor="hand2")
+        self.recap_btn.bind("<Button-1>", lambda _e: self._clear_selection())
+        self._recap_btn_shown = False
         self.topmost_var = tk.BooleanVar(value=True)
         tk.Checkbutton(
             top,
@@ -304,14 +418,37 @@ class TrackerApp:
             bg=BG, fg=FG_DIM, font=("Segoe UI", 10, "bold"), anchor="w"
         )
         self.detail_title.pack(fill="x", padx=10)
-        self.detail = tk.Frame(self.root, bg=BG)
-        self.detail.pack(fill="both", expand=True, padx=8, pady=(2, 4))
+
+        holder = tk.Canvas(self.root, bg=BG, highlightthickness=0)
+        scroll = tk.Scrollbar(self.root, orient="vertical", command=holder.yview,
+                              width=8)
+        holder.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y", pady=(2, 4))
+        holder.pack(fill="both", expand=True, padx=(8, 0), pady=(2, 4))
+        self.detail = tk.Frame(holder, bg=BG)
+        win = holder.create_window((0, 0), window=self.detail, anchor="nw")
+        self.detail.bind(
+            "<Configure>",
+            lambda _e: holder.configure(scrollregion=holder.bbox("all")),
+        )
+        holder.bind(
+            "<Configure>", lambda e: holder.itemconfigure(win, width=e.width)
+        )
+        self._detail_canvas = holder
+        self.root.bind_all("<MouseWheel>", self._on_wheel)
 
         self.status = tk.StringVar(value="starting…")
         tk.Label(
             self.root, textvariable=self.status, bg=BG, fg=FG_DIM,
             font=("Segoe UI", 8), anchor="w"
         ).pack(fill="x", side="bottom", padx=8, pady=(0, 6))
+
+    def _on_wheel(self, event):
+        c = self._detail_canvas
+        # Only scroll when the content actually overflows the viewport.
+        _, _, _, content_h = c.bbox("all") or (0, 0, 0, 0)
+        if content_h > c.winfo_height():
+            c.yview_scroll(-1 if event.delta > 0 else 1, "units")
 
     def _poll(self):
         if self.art_dirty.is_set():
@@ -343,6 +480,9 @@ class TrackerApp:
                 "own_extras": self.game._side_extras(self.game.friendly_controller),
                 "in_bg": self.game.is_battlegrounds,
                 "game_over": self.game.game_over,
+                "turn": self.game.turn,
+                "hp_track": list(self.game.hp_track),
+                "anomaly": self.game.anomaly_dbf,
             }
             self.cards.learn_all(self.game.learned_names)
         self._view = view
@@ -352,8 +492,26 @@ class TrackerApp:
         elif view["game_over"]:
             place = view["statuses"].get(view["friendly"], {}).get("place", 0)
             self.status.set(f"Game over — you placed #{place}" if place else "Game over")
+            if not self._recap_shown:
+                # Jump to the recap once per game and persist the game.
+                self._recap_shown = True
+                self.pinned_pid = None
+                self.hovered_pid = None
+                self._persist_game(view)
+            if not self._recap_btn_shown:
+                self._recap_btn_shown = True
+                self.recap_btn.pack(side="right", padx=(0, 8))
         else:
-            self.status.set("In game")
+            self._recap_shown = False
+            if self._recap_btn_shown:
+                self._recap_btn_shown = False
+                self.recap_btn.pack_forget()
+            txt = f"In game · round {view['turn']}" if view["turn"] else "In game"
+            if view["anomaly"]:
+                aid = self.cards.card_by_dbf(view["anomaly"])
+                if aid:
+                    txt += f" · anomaly: {self.cards.name(aid)}"
+            self.status.set(txt)
 
         teams = view["teams"]
         own_team = teams.get(view["friendly"], 0)
@@ -406,6 +564,7 @@ class TrackerApp:
         for pid in view["order"]:
             row = tk.Frame(self.rows_frame, bg=BG_ROW, padx=6, pady=3)
             row.pack(fill="x", pady=1)
+            self._hero_art(row, view, pid).pack(side="left", padx=(0, 6))
             left = tk.Label(row, text="", bg=BG_ROW, fg=FG,
                             font=("Segoe UI", 10), anchor="w")
             left.pack(side="left")
@@ -413,6 +572,24 @@ class TrackerApp:
             right.pack(side="right")
             self._bind_row(pid, view, row, left, right)
             self._rows[pid] = {"row": row, "left": left, "right": right, "cache": None}
+
+    HERO_ART_W = 52
+
+    def _hero_art(self, parent, view, pid):
+        """Small crop of the hero's tile art."""
+        h = 29
+        c = tk.Canvas(parent, width=self.HERO_ART_W, height=h, bg=BG_ROW,
+                      highlightthickness=0)
+        hero = view["heroes"].get(pid)
+        if hero is not None and hero.card_id:
+            img = self.art.get_tile_small(hero.card_id)
+            if img is not None:
+                c.create_image(self.HERO_ART_W, h // 2, image=img, anchor="e")
+                c.image = img
+                for width, stipple in ((10, "gray25"), (5, "gray50")):
+                    c.create_rectangle(0, 0, width, h, fill=BG_ROW, width=0,
+                                       stipple=stipple)
+        return c
 
     def _build_rows_duos(self, view):
         """One block per team: Σ caption on top, both heroes side by side."""
@@ -439,29 +616,47 @@ class TrackerApp:
                 cell = tk.Frame(block, bg=BG_ROW, padx=6, pady=3)
                 cell.grid(row=0, column=j, sticky="nsew",
                           padx=((0, 2) if j == 0 else (2, 0)))
-                left = tk.Label(cell, text="", bg=BG_ROW, fg=FG,
+                art = self._hero_art(cell, view, pid)
+                art.pack(side="left", padx=(0, 6))
+                texts = tk.Frame(cell, bg=BG_ROW)
+                texts.pack(side="left", fill="both", expand=True)
+                left = tk.Label(texts, text="", bg=BG_ROW, fg=FG,
                                 font=("Segoe UI", 10), anchor="w")
                 left.pack(fill="x")
-                right = tk.Label(cell, text="", bg=BG_ROW, fg=FG_DIM,
+                right = tk.Label(texts, text="", bg=BG_ROW, fg=FG_DIM,
                                  font=("Segoe UI", 8), anchor="w")
                 right.pack(fill="x")
-                self._bind_row(pid, view, cell, left, right)
+                self._bind_row(pid, view, cell, texts, art, left, right)
                 self._rows[pid] = {"row": cell, "left": left, "right": right, "cache": None}
 
     def _bind_row(self, pid, view, *widgets):
-        if pid == view["friendly"]:
-            return
         for w in widgets:
             w.bind("<Enter>", lambda _e, p=pid: self._hover(p))
             w.bind("<Button-1>", lambda _e, p=pid: self._pin(p))
+
+    # ------------------------------------------------------- derived numbers
+
+    def _threat(self, tech_level: int, minions) -> int:
+        """Rough damage this board deals on a full win: hero tier plus the
+        tier of every surviving minion."""
+        return tech_level + sum(self.cards.tech_level(m.card_id) or 1 for m in minions)
+
+    def _buff_delta(self, minions) -> tuple[int, int]:
+        da = dh = 0
+        for m in minions:
+            bs = self.cards.base_stats(m.card_id)
+            if bs is None:
+                continue
+            da += m.attack - bs[0]
+            dh += m.health - bs[1]
+        return da, dh
 
     def _team_sum(self, view, team) -> str:
         atk = hp = 0
         seen = False
         missing_mate = False
-        for p in view["order"]:
-            if view["teams"].get(p) != team:
-                continue
+        members = [p for p in view["order"] if view["teams"].get(p) == team]
+        for p in members:
             minions = None
             if p == view["friendly"]:
                 minions = view["own_board"]
@@ -476,7 +671,20 @@ class TrackerApp:
         if not seen:
             return "Σ —"
         note = "  (your side only)" if missing_mate else ""
-        return f"Σ {atk:,} / {hp:,}{note}"
+        rec = ""
+        if view["friendly"] not in members:
+            # Head-to-head record: one entry per combat round vs this team.
+            fights: dict[int, str] = {}
+            for p in members:
+                for s in view["history"].get(p, []):
+                    if s.result:
+                        fights[s.round_num] = s.result
+            w = sum(1 for r in fights.values() if r == "win")
+            l = sum(1 for r in fights.values() if r == "loss")
+            t = sum(1 for r in fights.values() if r == "tie")
+            if fights:
+                rec = f" · {w}W {l}L" + (f" {t}T" if t else "")
+        return f"Σ {atk:,} / {hp:,}{rec}{note}"
 
     def _update_rows(self, view):
         for lbl, team in self._caps:
@@ -500,11 +708,6 @@ class TrackerApp:
             )
             snap = view["snapshots"].get(pid)
 
-            hero_name = hero.name or self.cards.name(hero.card_id)
-            suffix = " (you)" if is_self else (" (teammate)" if is_teammate else "")
-            marker = "⚔ " if is_next else "   "
-            left_text = f"{marker}{hero_name}{suffix}"
-
             st = view["statuses"].get(pid, {})
             place = st.get("place", 0)
             ehp = st.get("hp", 0) + st.get("armor", 0)  # effective hp
@@ -519,7 +722,7 @@ class TrackerApp:
                 board = view["own_board"] if is_self else (snap.minions if snap else None)
                 tribe = self.cards.tribe_label(board) if board else ""
                 if tribe:
-                    parts.append(tribe)
+                    parts.append(TRIBE_ICONS.get(tribe, tribe))
                 if ehp > 0:
                     parts.append(f"{ehp}hp")
                 if is_self:
@@ -528,10 +731,18 @@ class TrackerApp:
                 elif snap:
                     if snap.tech_level:
                         parts.append(f"T{snap.tech_level}")
-                    parts.append(f"r{snap.round_num}")
+                    age = view["turn"] - snap.round_num if view["turn"] else 0
+                    parts.append(
+                        f"r{snap.round_num} ({age} old)" if age >= 2 else f"r{snap.round_num}"
+                    )
                 elif not is_teammate:
                     parts.append("—")
             right_text = " · ".join(parts)
+
+            hero_name = hero.name or self.cards.name(hero.card_id)
+            suffix = " (you)" if is_self else (" (teammate)" if is_teammate else "")
+            marker = ("👻 " if dead else "⚔ ") if is_next else ""
+            left_text = f"{marker}{hero_name}{suffix}"
 
             fg = ACCENT if is_next else (FG_DIM if dead else FG)
             font = ("Segoe UI", 10, "bold" if is_next else "normal")
@@ -564,6 +775,55 @@ class TrackerApp:
         self._detail_sel = (pid, idx)
         self._update_detail()
 
+    def _clear_selection(self):
+        """Back to the default view (the recap, once a game is over)."""
+        self._last_click = time.time()
+        self.pinned_pid = None
+        self.hovered_pid = None
+        self._detail_sel = None
+        self._update_highlight()
+        self._update_detail()
+
+    # ------------------------------------------------------ game persistence
+
+    def _persist_game(self, view):
+        """Append the finished game to games_history.jsonl (deduplicated, so
+        re-parsing the log after an app restart doesn't double-write)."""
+        try:
+            sig_src = json.dumps(
+                [sorted(view["names"].items()), view["hp_track"]], default=str
+            )
+            sig = hashlib.md5(sig_src.encode()).hexdigest()[:12]
+            if HISTORY_FILE.exists():
+                with open(HISTORY_FILE, "rb") as fh:
+                    fh.seek(0, 2)
+                    fh.seek(max(0, fh.tell() - 65536))
+                    if sig.encode() in fh.read():
+                        return
+            rec = {
+                "sig": sig,
+                "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "mode": "duos" if view["teams"] else "solo",
+                "own_pid": view["friendly"],
+                "teammate": view["teammate"],
+                "place": view["statuses"].get(view["friendly"], {}).get("place", 0),
+                "teams": view["teams"],
+                "names": view["names"],
+                "heroes": {
+                    p: (h.name or h.card_id) for p, h in view["heroes"].items()
+                },
+                "statuses": view["statuses"],
+                "hp_track": view["hp_track"],
+                "history": {
+                    p: [asdict(s) for s in snaps]
+                    for p, snaps in view["history"].items()
+                },
+            }
+            with open(HISTORY_FILE, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception:
+            pass  # never let stats bookkeeping break the tracker
+
     def _shown_pid(self):
         return self.pinned_pid if self.pinned_pid is not None else self.hovered_pid
 
@@ -585,6 +845,8 @@ class TrackerApp:
                 refs["row"].configure(bg=color)
                 for child in refs["row"].winfo_children():
                     child.configure(bg=color)
+                    for grandchild in child.winfo_children():
+                        grandchild.configure(bg=color)
         self._highlight_pids = group
 
     def _update_detail(self):
@@ -592,12 +854,18 @@ class TrackerApp:
         if view is None:
             return
         pid = self._shown_pid()
+        if pid is None and view["game_over"] and view["hp_track"]:
+            self._update_detail_recap(view)
+            return
         teams = view["teams"]
         if pid is not None and teams and pid in teams:
             members = [p for p in view["order"] if teams.get(p) == teams[pid]]
             if len(members) >= 2:
                 self._update_detail_team(view, members)
                 return
+        if pid is not None and pid == view["friendly"]:
+            self._update_detail_self(view)
+            return
         hist = view["history"].get(pid, []) if pid is not None else []
         if self._detail_sel and self._detail_sel[0] == pid and self._detail_sel[1] < len(hist):
             idx = self._detail_sel[1]
@@ -624,6 +892,9 @@ class TrackerApp:
             self.detail_title.configure(text=f"{hero_name}{pin_mark} — no board seen yet")
             return
         title = f"{hero_name}{pin_mark} — round {snap.round_num}"
+        age = view["turn"] - snap.round_num if view["turn"] else 0
+        if age >= 2:
+            title += f" ({age} old)"
         tag = view["names"].get(pid, "")
         if tag:
             title += f"  ({tag})"
@@ -636,22 +907,31 @@ class TrackerApp:
             "loss": f"you lost (-{snap.result_dmg})",
             "tie": "tied",
         }.get(snap.result, "")
-        if result_txt or snap.hero_power or snap.trinkets:
-            meta = tk.Frame(self.detail, bg=BG)
-            meta.pack(fill="x", padx=4, pady=(0, 2))
-            if result_txt:
-                tk.Label(meta, text=result_txt, bg=BG, fg=FG_DIM,
-                         font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
-            hoverables = []
-            if snap.hero_power:
-                hoverables.append(("⚡ " + self.cards.name(snap.hero_power), snap.hero_power))
-            for t in snap.trinkets:
-                hoverables.append(("🎁 " + self.cards.name(t), t))
-            for text, cid in hoverables:
-                lbl = tk.Label(meta, text=text, bg=BG, fg=FG_DIM,
-                               font=("Segoe UI", 9, "underline"))
-                lbl.pack(side="left", padx=(0, 8))
-                self.tooltip.attach(lbl, cid)
+        meta = tk.Frame(self.detail, bg=BG)
+        meta.pack(fill="x", padx=4, pady=(0, 2))
+        plain = []
+        if result_txt:
+            plain.append(result_txt)
+        plain.append(f"~{self._threat(snap.tech_level, snap.minions)} dmg")
+        da, dh = self._buff_delta(snap.minions)
+        if da > 0 or dh > 0:
+            plain.append(f"+{da}/+{dh} buffs")
+        tk.Label(meta, text=" · ".join(plain), bg=BG, fg=FG_DIM,
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
+        hoverables = []
+        if snap.hero_power:
+            hoverables.append(("⚡ " + self.cards.name(snap.hero_power), snap.hero_power))
+        for t in snap.trinkets:
+            hoverables.append(("🎁 " + self.cards.name(t), t))
+        if snap.buddy_dbf:
+            bid = self.cards.card_by_dbf(snap.buddy_dbf)
+            if bid:
+                hoverables.append(("🤝 " + self.cards.name(bid), bid))
+        for text, cid in hoverables:
+            lbl = tk.Label(meta, text=text, bg=BG, fg=FG_DIM,
+                           font=("Segoe UI", 9, "underline"))
+            lbl.pack(side="left", padx=(0, 8))
+            self.tooltip.attach(lbl, cid)
 
         if len(hist) > 1:
             rounds = tk.Frame(self.detail, bg=BG)
@@ -677,6 +957,94 @@ class TrackerApp:
             return
         for m in snap.minions:
             self._minion_row(self.detail, m)
+
+    # ---------------------------------------------------- self view and recap
+
+    def _update_detail_self(self, view):
+        """Our own live board (solo games; duos shows it in the team view)."""
+        minions = view["own_board"]
+        key = ("self", tuple((m.card_id, m.attack, m.health, m.golden) for m in minions))
+        if key == self._detail_key:
+            return
+        self._detail_key = key
+        self.tooltip.hide()
+        for w in self.detail.winfo_children():
+            w.destroy()
+        self.detail_title.configure(text="Your board — live")
+
+        trinkets, hero_power = view["own_extras"]
+        meta = tk.Frame(self.detail, bg=BG)
+        meta.pack(fill="x", padx=4, pady=(0, 2))
+        plain = [f"~{self._threat(view['own_tier'], minions)} dmg"]
+        da, dh = self._buff_delta(minions)
+        if da > 0 or dh > 0:
+            plain.append(f"+{da}/+{dh} buffs")
+        tk.Label(meta, text=" · ".join(plain), bg=BG, fg=FG_DIM,
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
+        hoverables = [("⚡ " + self.cards.name(hero_power), hero_power)] if hero_power else []
+        hoverables += [("🎁 " + self.cards.name(t), t) for t in trinkets]
+        for text, cid in hoverables:
+            lbl = tk.Label(meta, text=text, bg=BG, fg=FG_DIM,
+                           font=("Segoe UI", 9, "underline"))
+            lbl.pack(side="left", padx=(0, 8))
+            self.tooltip.attach(lbl, cid)
+
+        if not minions:
+            tk.Label(self.detail, text="(empty board)", bg=BG, fg=FG_DIM,
+                     font=("Segoe UI", 9), anchor="w").pack(fill="x", padx=4)
+        for m in minions:
+            self._minion_row(self.detail, m)
+
+    def _update_detail_recap(self, view):
+        track = view["hp_track"]
+        place = view["statuses"].get(view["friendly"], {}).get("place", 0)
+        key = ("recap", len(track), place)
+        if key == self._detail_key:
+            return
+        self._detail_key = key
+        self.tooltip.hide()
+        for w in self.detail.winfo_children():
+            w.destroy()
+        self.detail_title.configure(
+            text=f"Recap — you placed #{place}" if place else "Recap"
+        )
+
+        w, h, pad = 330, 70, 10
+        c = tk.Canvas(self.detail, width=w, height=h, bg=BG, highlightthickness=0)
+        c.pack(padx=4, pady=(2, 4), anchor="w")
+        hps = [hp for _, hp in track]
+        top = max(max(hps), 1)
+        pts = []
+        for i, (_rnd, hp) in enumerate(track):
+            x = pad + i * (w - 2 * pad) / max(len(track) - 1, 1)
+            y = h - pad - (max(hp, 0) / top) * (h - 2 * pad)
+            pts.append((x, y))
+        for a, b in zip(pts, pts[1:]):
+            c.create_line(*a, *b, fill=ACCENT, width=2)
+        for (x, y), (rnd, hp) in zip(pts, track):
+            c.create_oval(x - 2, y - 2, x + 2, y + 2, fill=FG, outline="")
+        first_r, last_r = track[0][0], track[-1][0]
+        c.create_text(pad, h - 2, text=f"r{first_r}", fill=FG_DIM,
+                      font=("Segoe UI", 7), anchor="sw")
+        c.create_text(w - pad, h - 2, text=f"r{last_r}", fill=FG_DIM,
+                      font=("Segoe UI", 7), anchor="se")
+        c.create_text(pad, 2, text=f"{top}hp", fill=FG_DIM,
+                      font=("Segoe UI", 7), anchor="nw")
+
+        placed = sorted(
+            (st.get("place", 9), p) for p, st in view["statuses"].items()
+        )
+        for pl, p in placed:
+            if not pl or pl > 8 or p not in view["heroes"]:
+                continue
+            hero = view["heroes"][p]
+            name = hero.name or self.cards.name(hero.card_id)
+            you = "  (you)" if p == view["friendly"] else ""
+            tk.Label(
+                self.detail, text=f"#{pl}  {name}{you}", bg=BG,
+                fg=FG if p == view["friendly"] else FG_DIM,
+                font=("Segoe UI", 9), anchor="w",
+            ).pack(fill="x", padx=6)
 
     # ------------------------------------------------------- duos team detail
 
@@ -745,12 +1113,17 @@ class TrackerApp:
         else:
             trinkets, hero_power = snap.trinkets, snap.hero_power
             minions = snap.minions
-            bits = [f"r{snap.round_num}"]
+            age = view["turn"] - snap.round_num if view["turn"] else 0
+            bits = [f"r{snap.round_num}" + (f" ({age} old)" if age >= 2 else "")]
             if snap.tech_level:
                 bits.append(f"T{snap.tech_level}")
+            bits.append(f"~{self._threat(snap.tech_level, minions)} dmg")
+            da, dh = self._buff_delta(minions)
+            if da > 0 or dh > 0:
+                bits.append(f"+{da}/+{dh}")
             bits.append({
-                "win": f"you won (+{snap.result_dmg})",
-                "loss": f"you lost (-{snap.result_dmg})",
+                "win": f"won (+{snap.result_dmg})",
+                "loss": f"lost (-{snap.result_dmg})",
                 "tie": "tied",
             }.get(snap.result, ""))
             sub = " · ".join(b for b in bits if b)
@@ -764,6 +1137,10 @@ class TrackerApp:
             hoverables.append(("⚡ " + self.cards.name(hero_power), hero_power))
         for t in trinkets:
             hoverables.append(("🎁 " + self.cards.name(t), t))
+        if not is_self and snap is not None and snap.buddy_dbf:
+            bid = self.cards.card_by_dbf(snap.buddy_dbf)
+            if bid:
+                hoverables.append(("🤝 " + self.cards.name(bid), bid))
         for text, cid in hoverables:
             lbl = tk.Label(extras, text=text, bg=BG, fg=FG_DIM,
                            font=("Segoe UI", 8, "underline"), anchor="w")
@@ -829,6 +1206,11 @@ class TrackerApp:
             aw - 2 - sw / 2, h - 10, text=stats,
             fill=GOLD if m.golden else "#ffffff", font=("Consolas", 9, "bold"),
         )
+        tier = self.cards.tech_level(m.card_id)
+        if tier:
+            c.create_oval(aw - 16, 2, aw - 2, 16, fill="#1d3050", outline="#0a0a10")
+            c.create_text(aw - 9, 9, text=str(tier), fill="#e8e6e3",
+                          font=("Segoe UI", 7, "bold"))
 
         texts = tk.Frame(row, bg=BG_ROW)
         texts.pack(side="left", fill="both", expand=True, padx=(8, 0))
