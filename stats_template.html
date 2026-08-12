@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BG Tracker — stats</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --surface-2: #26272b;
+    --ink: #ffffff;
+    --ink-2: #c3c2b7;
+    --muted: #898781;
+    --grid: #2c2c2a;
+    --baseline: #383835;
+    --border: rgba(255,255,255,0.10);
+    --series-1: #3987e5;  /* blue — primary series */
+    --series-2: #d95926;  /* orange — second single-series panel */
+    --gold: #ffd75e;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--page); color: var(--ink);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding: 24px 16px 48px;
+  }
+  .wrap { max-width: 1000px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 600; }
+  .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  h2 { font-size: 13px; font-weight: 600; color: var(--ink-2); margin: 0 0 10px; }
+
+  .filters { display: flex; gap: 6px; margin: 18px 0 14px; }
+  .filters button {
+    background: var(--surface); color: var(--ink-2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 5px 14px; font: inherit; font-size: 13px; cursor: pointer;
+  }
+  .filters button:hover { background: var(--surface-2); }
+  .filters button.on { background: var(--surface-2); color: var(--ink); border-color: var(--baseline); font-weight: 600; }
+
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+  .tile { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+  .tile .label { color: var(--muted); font-size: 12px; }
+  .tile .value { font-size: 28px; font-weight: 600; margin-top: 2px; }
+  .tile .note { color: var(--ink-2); font-size: 12px; margin-top: 2px; }
+
+  .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px; min-width: 0; }
+  .card.wide { grid-column: 1 / -1; }
+  @media (max-width: 760px) { .cards { grid-template-columns: 1fr; } }
+  svg { display: block; width: 100%; height: auto; }
+  svg text { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+
+  .empty { color: var(--muted); padding: 20px 0; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--muted); font-weight: 500; font-size: 12px;
+       border-bottom: 1px solid var(--baseline); padding: 6px 8px; }
+  td { padding: 6px 8px; border-bottom: 1px solid var(--grid); }
+  td.num { font-variant-numeric: tabular-nums; }
+  tr.game { cursor: pointer; }
+  tr.game:hover td { background: var(--surface-2); }
+  tr.detail td { background: var(--surface-2); border-bottom: 1px solid var(--baseline); }
+  .chip { display: inline-block; background: var(--surface); border: 1px solid var(--border);
+          border-radius: 5px; padding: 2px 7px; margin: 2px 3px 2px 0; font-size: 12px; }
+  .chip.gold { border-color: var(--gold); color: var(--gold); }
+  .chip .st { color: var(--muted); }
+  .fightseq { color: var(--ink-2); font-size: 12px; margin-top: 6px; }
+  .win  { color: #0ca30c; }
+  .loss { color: #ec835a; }
+
+  #tooltip {
+    position: fixed; pointer-events: none; z-index: 10; display: none;
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: 7px;
+    padding: 7px 10px; font-size: 12px; max-width: 260px; box-shadow: 0 4px 14px rgba(0,0,0,.5);
+  }
+  #tooltip .v { font-size: 14px; font-weight: 600; }
+  #tooltip .k { color: var(--ink-2); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>BG Tracker — stats</h1>
+  <div class="sub" id="generated"></div>
+
+  <div class="filters" id="modeFilter" role="group" aria-label="Mode filter"></div>
+
+  <div class="tiles" id="tiles"></div>
+
+  <div class="cards">
+    <div class="card wide">
+      <h2>Placement over time <span style="color:var(--muted);font-weight:400">(1 = win, lower is better)</span></h2>
+      <div id="timeline"></div>
+    </div>
+    <div class="card">
+      <h2>Average placement by final tribe</h2>
+      <div id="tribes"></div>
+    </div>
+    <div class="card">
+      <h2>Fight record by round</h2>
+      <div id="roundrec"></div>
+    </div>
+    <div class="card">
+      <h2>Minions most seen in winning fights</h2>
+      <div id="winMinions"></div>
+    </div>
+    <div class="card">
+      <h2>Minions most seen in losing fights</h2>
+      <div id="lossMinions"></div>
+    </div>
+    <div class="card wide">
+      <h2>Match history <span style="color:var(--muted);font-weight:400">(click a row for the final board)</span></h2>
+      <div id="historyTable"></div>
+    </div>
+  </div>
+</div>
+<div id="tooltip"></div>
+
+<script>
+"use strict";
+const DATA = /*__DATA__*/;
+const S1 = getComputedStyle(document.documentElement).getPropertyValue("--series-1").trim();
+const S2 = getComputedStyle(document.documentElement).getPropertyValue("--series-2").trim();
+const NS = "http://www.w3.org/2000/svg";
+
+document.getElementById("generated").textContent =
+  `${DATA.games.length} recorded game(s) · generated ${DATA.generated} · rerun "python stats_page.py" (or the tracker's 📈 button) to refresh`;
+
+// ------------------------------------------------------------------ helpers
+function el(parent, tag, attrs) {
+  const n = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs || {})) n.setAttribute(k, v);
+  if (parent) parent.appendChild(n);
+  return n;
+}
+function html(parent, tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text;
+  if (parent) parent.appendChild(n);
+  return n;
+}
+const tooltip = document.getElementById("tooltip");
+function showTip(evt, valueText, labelText) {
+  tooltip.replaceChildren();
+  html(tooltip, "div", "v", valueText);
+  if (labelText) html(tooltip, "div", "k", labelText);
+  tooltip.style.display = "block";
+  const pad = 14;
+  let x = evt.clientX + pad, y = evt.clientY + pad;
+  const r = tooltip.getBoundingClientRect();
+  if (x + r.width > innerWidth - 8) x = evt.clientX - r.width - pad;
+  if (y + r.height > innerHeight - 8) y = evt.clientY - r.height - pad;
+  tooltip.style.left = x + "px";
+  tooltip.style.top = y + "px";
+}
+function hideTip() { tooltip.style.display = "none"; }
+function hoverable(node, tipFn) {
+  node.addEventListener("pointermove", e => { const t = tipFn(); showTip(e, t[0], t[1]); });
+  node.addEventListener("pointerleave", hideTip);
+}
+// Horizontal bar with a 4px rounded data-end, square at the baseline.
+function barPath(x, y, w, h) {
+  const r = Math.min(4, w);
+  return `M${x},${y} h${w - r} a${r},${r} 0 0 1 ${r},${r} v${h - 2 * r} a${r},${r} 0 0 1 ${-r},${r} h${-(w - r)} z`;
+}
+
+// ------------------------------------------------------------------- filter
+let mode = "all";
+const filterBox = document.getElementById("modeFilter");
+for (const [key, label] of [["all", "All"], ["solo", "Solo"], ["duos", "Duos"]]) {
+  const b = document.createElement("button");
+  b.textContent = label;
+  b.dataset.mode = key;
+  b.addEventListener("click", () => { mode = key; render(); });
+  filterBox.appendChild(b);
+}
+
+function games() {
+  return DATA.games.filter(g => mode === "all" || g.mode === mode);
+}
+
+// -------------------------------------------------------------------- tiles
+function renderTiles(gs) {
+  const box = document.getElementById("tiles");
+  box.replaceChildren();
+  const placed = gs.filter(g => g.place > 0);
+  const avg = placed.length ? placed.reduce((a, g) => a + g.place, 0) / placed.length : 0;
+  const firsts = placed.filter(g => g.place === 1).length;
+  let w = 0, l = 0;
+  for (const g of gs) for (const f of g.fights) {
+    if (f.res === "win") w++; else if (f.res === "loss") l++;
+  }
+  const tiles = [
+    ["Games", String(gs.length), mode === "all" ? "all modes" : mode],
+    ["Average placement", placed.length ? avg.toFixed(2) : "—", `${placed.length} placed`],
+    ["First places", String(firsts), placed.length ? `${Math.round(100 * firsts / placed.length)}% of games` : ""],
+    ["Fight winrate", (w + l) ? `${Math.round(100 * w / (w + l))}%` : "—", `${w}W ${l}L`],
+  ];
+  for (const [label, value, note] of tiles) {
+    const t = html(box, "div", "tile");
+    html(t, "div", "label", label);
+    html(t, "div", "value", value);
+    if (note) html(t, "div", "note", note);
+  }
+}
+
+// ----------------------------------------------------------------- timeline
+function renderTimeline(gs) {
+  const box = document.getElementById("timeline");
+  box.replaceChildren();
+  const placed = gs.filter(g => g.place > 0);
+  if (!placed.length) { html(box, "div", "empty", "No placed games yet."); return; }
+  const W = 940, H = 190, L = 34, R = 14, T = 12, B = 26;
+  const svg = el(null, "svg", { viewBox: `0 0 ${W} ${H}` });
+  const maxPlace = 8;
+  const y = p => T + (p - 1) / (maxPlace - 1) * (H - T - B);
+  const x = i => placed.length === 1 ? W / 2 : L + i * (W - L - R) / (placed.length - 1);
+  for (const p of [1, 2, 4, 6, 8]) {
+    el(svg, "line", { x1: L, x2: W - R, y1: y(p), y2: y(p), stroke: "var(--grid)", "stroke-width": 1 });
+    el(svg, "text", { x: L - 8, y: y(p) + 4, "text-anchor": "end", fill: "var(--muted)", "font-size": 11 }).textContent = "#" + p;
+  }
+  if (placed.length > 1) {
+    const pts = placed.map((g, i) => `${x(i)},${y(g.place)}`).join(" ");
+    el(svg, "polyline", { points: pts, fill: "none", stroke: S1, "stroke-width": 2,
+                          "stroke-linejoin": "round", "stroke-linecap": "round" });
+  }
+  placed.forEach((g, i) => {
+    el(svg, "circle", { cx: x(i), cy: y(g.place), r: 5, fill: S1, stroke: "var(--surface)", "stroke-width": 2 });
+    const hit = el(svg, "circle", { cx: x(i), cy: y(g.place), r: 14, fill: "transparent" });
+    hoverable(hit, () => [`#${g.place}`, `${g.hero} · ${g.mode} · ${g.ts}`]);
+  });
+  const first = placed[0], last = placed[placed.length - 1];
+  el(svg, "text", { x: L, y: H - 8, fill: "var(--muted)", "font-size": 11 }).textContent = (first.ts || "").slice(0, 10);
+  if (placed.length > 1)
+    el(svg, "text", { x: W - R, y: H - 8, "text-anchor": "end", fill: "var(--muted)", "font-size": 11 })
+      .textContent = (last.ts || "").slice(0, 10);
+  box.appendChild(svg);
+}
+
+// -------------------------------------------------- generic horizontal bars
+function renderBars(boxId, rows, color, tipFn, valueFmt, domainMax) {
+  // rows: [{label, value, note}]
+  const box = document.getElementById(boxId);
+  box.replaceChildren();
+  if (!rows.length) { html(box, "div", "empty", "No data for this filter."); return; }
+  const W = 440, rowH = 26, barH = 16, labelW = 150, valueW = 64;
+  const H = rows.length * rowH + 4;
+  const svg = el(null, "svg", { viewBox: `0 0 ${W} ${H}` });
+  const trackW = W - labelW - valueW;
+  const max = domainMax || Math.max(...rows.map(r => r.value)) || 1;
+  el(svg, "line", { x1: labelW, x2: labelW, y1: 0, y2: H - 4, stroke: "var(--baseline)", "stroke-width": 1 });
+  rows.forEach((r, i) => {
+    const yTop = i * rowH + (rowH - barH) / 2;
+    const lab = el(svg, "text", { x: labelW - 8, y: yTop + barH - 4, "text-anchor": "end",
+                                  fill: "var(--ink-2)", "font-size": 12 });
+    lab.textContent = r.label.length > 20 ? r.label.slice(0, 19) + "…" : r.label;
+    const w = Math.max(2, r.value / max * trackW);
+    const bar = el(svg, "path", { d: barPath(labelW, yTop, w, barH), fill: color });
+    const val = el(svg, "text", { x: labelW + w + 6, y: yTop + barH - 4, fill: "var(--ink)",
+                                  "font-size": 12, "font-weight": 600 });
+    val.textContent = valueFmt(r.value);
+    if (r.note) {
+      const note = el(svg, "text", { x: labelW + w + 6 + String(valueFmt(r.value)).length * 7 + 6,
+                                     y: yTop + barH - 4, fill: "var(--muted)", "font-size": 11 });
+      note.textContent = r.note;
+    }
+    const hit = el(svg, "rect", { x: 0, y: i * rowH, width: W, height: rowH, fill: "transparent" });
+    bar.style.transition = "filter .1s";
+    hit.addEventListener("pointerenter", () => bar.style.filter = "brightness(1.2)");
+    hit.addEventListener("pointerleave", () => { bar.style.filter = ""; hideTip(); });
+    hoverable(hit, () => tipFn(r));
+  });
+  box.appendChild(svg);
+}
+
+function renderTribes(gs) {
+  const byTribe = new Map();
+  for (const g of gs) {
+    if (!g.place || !g.tribe) continue;
+    if (!byTribe.has(g.tribe)) byTribe.set(g.tribe, []);
+    byTribe.get(g.tribe).push(g.place);
+  }
+  const rows = [...byTribe.entries()]
+    .map(([t, ps]) => ({ label: t, value: ps.reduce((a, b) => a + b, 0) / ps.length, note: `(${ps.length})` }))
+    .sort((a, b) => a.value - b.value);
+  renderBars("tribes", rows, S1,
+    r => [`avg #${r.value.toFixed(2)}`, `${r.label} · ${r.note.replace(/[()]/g, "")} game(s)`],
+    v => v.toFixed(2), 8);
+}
+
+function renderRoundRecord(gs) {
+  // Win/loss counts bucketed by round: early (1-4), mid (5-8), late (9+)
+  const buckets = [["r1–4", 1, 4], ["r5–8", 5, 8], ["r9+", 9, 99]];
+  const rows = buckets.map(([label, lo, hi]) => {
+    let w = 0, n = 0;
+    for (const g of gs) for (const f of g.fights) {
+      if (f.r < lo || f.r > hi) continue;
+      if (f.res === "win") { w++; n++; }
+      else if (f.res === "loss") n++;
+    }
+    return { label, value: n ? w / n * 100 : 0, note: n ? `${w}/${n}` : "—" };
+  }).filter(r => r.note !== "—");
+  renderBars("roundrec", rows, S1,
+    r => [`${r.value.toFixed(0)}% won`, `${r.label} · ${r.note} fights won`],
+    v => v.toFixed(0) + "%", 100);
+}
+
+function renderMinions(gs) {
+  const win = new Map(), loss = new Map();
+  for (const g of gs) for (const f of g.fights) {
+    const m = f.res === "win" ? win : f.res === "loss" ? loss : null;
+    if (!m) continue;
+    for (const name of f.board) m.set(name, (m.get(name) || 0) + 1);
+  }
+  const top = m => [...m.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8)
+    .map(([label, value]) => ({ label, value }));
+  renderBars("winMinions", top(win), S1,
+    r => [`${r.value}×`, `${r.label} — appearances in winning fights`], String);
+  renderBars("lossMinions", top(loss), S2,
+    r => [`${r.value}×`, `${r.label} — appearances in losing fights`], String);
+}
+
+// -------------------------------------------------------------------- table
+function sparkline(hp) {
+  if (!hp || hp.length < 2) return document.createTextNode("—");
+  const W = 64, H = 18, max = Math.max(...hp, 1);
+  const svg = el(null, "svg", { viewBox: `0 0 ${W} ${H}`, style: "width:64px;height:18px" });
+  const pts = hp.map((v, i) => `${2 + i * (W - 4) / (hp.length - 1)},${H - 2 - Math.max(v, 0) / max * (H - 4)}`);
+  el(svg, "polyline", { points: pts.join(" "), fill: "none", stroke: "var(--muted)",
+                        "stroke-width": 1.5, "stroke-linejoin": "round" });
+  const [lx, ly] = pts[pts.length - 1].split(",");
+  el(svg, "circle", { cx: lx, cy: ly, r: 2.5, fill: S1 });
+  return svg;
+}
+
+function renderTable(gs) {
+  const box = document.getElementById("historyTable");
+  box.replaceChildren();
+  if (!gs.length) { html(box, "div", "empty", "No games for this filter."); return; }
+  const table = document.createElement("table");
+  const thead = table.createTHead();
+  const hr = thead.insertRow();
+  for (const h of ["Date", "Mode", "Hero", "Tribe", "Place", "Rounds", "HP", "Result"])
+    html(hr, "th", "", h);
+  const tbody = table.createTBody();
+  [...gs].reverse().forEach(g => {
+    const tr = tbody.insertRow();
+    tr.className = "game";
+    html(tr, "td", "", (g.ts || "").slice(0, 16));
+    html(tr, "td", "", g.mode);
+    html(tr, "td", "", g.hero);
+    html(tr, "td", "", g.tribe || "—");
+    html(tr, "td", "num", g.place ? "#" + g.place : "—");
+    html(tr, "td", "num", String(g.rounds || "—"));
+    tr.insertCell().appendChild(sparkline(g.hp));
+    const wins = g.fights.filter(f => f.res === "win").length;
+    const losses = g.fights.filter(f => f.res === "loss").length;
+    html(tr, "td", "num", `${wins}W ${losses}L`);
+    let detail = null;
+    tr.addEventListener("click", () => {
+      if (detail) { detail.remove(); detail = null; return; }
+      detail = tbody.insertRow(tr.rowIndex);  // rowIndex counts thead; lands after tr
+      detail.className = "detail";
+      const td = detail.insertCell();
+      td.colSpan = 8;
+      if (g.finalBoard.length) {
+        for (const m of g.finalBoard) {
+          const chip = html(td, "span", "chip" + (m.g ? " gold" : ""));
+          chip.append(document.createTextNode((m.g ? "★ " : "") + m.n + " "));
+          html(chip, "span", "st", `${m.a}/${m.h}`);
+        }
+      } else {
+        html(td, "div", "empty", "final board not recorded");
+      }
+      const seq = html(td, "div", "fightseq", "fights: ");
+      g.fights.forEach(f => {
+        const mark = f.res === "win" ? `r${f.r}+${f.dmg} ` : f.res === "loss" ? `r${f.r}−${f.dmg} ` : `r${f.r}= `;
+        html(seq, "span", f.res === "win" ? "win" : f.res === "loss" ? "loss" : "", mark);
+      });
+    });
+  });
+  box.appendChild(table);
+}
+
+// ------------------------------------------------------------------- render
+function render() {
+  for (const b of filterBox.children) b.classList.toggle("on", b.dataset.mode === mode);
+  const gs = games();
+  renderTiles(gs);
+  renderTimeline(gs);
+  renderTribes(gs);
+  renderRoundRecord(gs);
+  renderMinions(gs);
+  renderTable(gs);
+}
+render();
+</script>
+</body>
+</html>

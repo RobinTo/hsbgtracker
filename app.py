@@ -410,6 +410,10 @@ class TrackerApp:
                                   font=("Segoe UI", 8, "underline"), cursor="hand2")
         self.recap_btn.bind("<Button-1>", lambda _e: self._clear_selection())
         self._recap_btn_shown = False
+        stats_btn = tk.Label(top, text="📈 stats", bg=BG, fg=FG_DIM,
+                             font=("Segoe UI", 8, "underline"), cursor="hand2")
+        stats_btn.bind("<Button-1>", lambda _e: self._open_stats())
+        stats_btn.pack(side="right", padx=(0, 8))
         self.topmost_var = tk.BooleanVar(value=True)
         tk.Checkbutton(
             top,
@@ -792,6 +796,17 @@ class TrackerApp:
         self._last_click = time.time()
         self._detail_sel = (pid, idx)
         self._update_detail()
+
+    def _open_stats(self):
+        def work():
+            try:
+                import stats_page
+
+                stats_page.build(open_browser=True)
+            except Exception:
+                pass
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _clear_selection(self):
         """Back to the default view (the recap, once a game is over)."""
