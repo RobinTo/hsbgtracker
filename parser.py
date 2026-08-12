@@ -138,6 +138,7 @@ class BgGame:
         # friendly side alternates fighters too — when our teammate fights,
         # their board appears on our side and we snapshot it the same way.
         self._in_combat = False
+        self._cycle_started = False  # MAIN_START seen since last MAIN_READY
         self._last_combat_pid = 0
         self._pending_swap = 0
         self._pending_combat_friendly = 0
@@ -300,12 +301,28 @@ class BgGame:
                 if self._in_combat:
                     if pid != self._last_friendly_pid:
                         self._pending_friendly_swap = pid
+                elif self._cycle_started:
+                    # Announced after MAIN_START (tag order varies by patch);
+                    # capture via the deferred path.
+                    self._last_friendly_pid = pid
+                    self._pending_friendly_swap = pid
                 else:
                     self._pending_combat_friendly = pid
             elif pid > 0 and self.friendly_controller:
                 if self._in_combat:
                     if pid != self._last_combat_pid:
                         self._pending_swap = pid
+                elif self._cycle_started:
+                    # Combat announced after MAIN_START — enter combat mode
+                    # now; the board snapshot happens when attacks begin.
+                    self._in_combat = True
+                    self._last_combat_pid = pid
+                    self._combat_snaps = []
+                    self._combat_pre = (
+                        self._pid_hp(self.friendly_controller),
+                        self._pid_hp(pid),
+                    )
+                    self._pending_swap = pid
                 else:
                     self._pending_combat_opponent = pid
                 if (
@@ -362,7 +379,10 @@ class BgGame:
             self._pending_combat_friendly = 0
             self._pending_friendly_swap = 0
             self._in_combat = False
-        elif step == "MAIN_START" and self._pending_combat_opponent:
+            self._cycle_started = False
+        elif step == "MAIN_START":
+            self._cycle_started = True
+        if step == "MAIN_START" and self._pending_combat_opponent:
             # Warband setup (inside the BaconShop8PlayerEnchant trigger block
             # after MAIN_START_TRIGGERS) is usually complete here; attacks
             # have not begun. If a board is still empty (placement can land
@@ -466,7 +486,11 @@ class BgGame:
         for snap in self._combat_snaps:
             snap.result = result
             snap.result_dmg = dmg
-        self.hp_track.append((self.turn, self._pid_hp(self.friendly_controller)))
+        hp_now = (self.turn, self._pid_hp(self.friendly_controller))
+        if self.hp_track and self.hp_track[-1][0] == self.turn:
+            self.hp_track[-1] = hp_now  # same combat resolved twice: keep newest
+        else:
+            self.hp_track.append(hp_now)
         self._combat_pre = None
         self._combat_snaps = []
 
@@ -544,7 +568,11 @@ class BgGame:
             minions=[self._minion(e) for e in board],
         )
         self.snapshots[opponent_id] = snap
-        self.history.setdefault(opponent_id, []).append(snap)
+        lst = self.history.setdefault(opponent_id, [])
+        if lst and lst[-1].round_num == snap.round_num:
+            lst[-1] = snap  # re-capture of the same combat: keep the newest
+        else:
+            lst.append(snap)
         self._combat_snaps.append(snap)
         if self.debug:
             print(f"-- snapshot: turn={self.turn} round={snap.round_num} "

@@ -62,10 +62,13 @@ def test_duos_game1():
         [s.result for s in g.history.get(4, [])],
         ["win", "win", "loss", "win"],
     )
-    check("duos: teammate snapshot count", len(g.history.get(7, [])), 10)
+    # The r14 final combat is announced after MAIN_START (tag ordering varies
+    # by patch) — the late-entry path recovers it, hence 11 teammate boards.
+    check("duos: teammate snapshot count", len(g.history.get(7, [])), 11)
+    check("duos: teammate final round", g.history.get(7, [])[-1].round_num, 14)
     check("duos: name of pid 1", g.player_names.get(1), "MrAzaghast")
     check("duos: hp_track length", len(g.hp_track), 13)
-    check("duos: final effective hp", g.hp_track[-1][1], 15)
+    check("duos: final effective hp", g.hp_track[-1][1], 20)
 
 
 def test_solo_capped():
