@@ -198,10 +198,13 @@ function renderTiles(gs) {
   for (const g of gs) for (const f of g.fights) {
     if (f.res === "win") w++; else if (f.res === "loss") l++;
   }
+  const unplaced = gs.length - placed.length;
   const tiles = [
-    ["Games", String(gs.length), mode === "all" ? "all modes" : mode],
-    ["Average placement", placed.length ? avg.toFixed(2) : "—", `${placed.length} placed`],
-    ["First places", String(firsts), placed.length ? `${Math.round(100 * firsts / placed.length)}% of games` : ""],
+    ["Games", String(gs.length),
+     (mode === "all" ? "all modes" : mode) + (unplaced ? ` · ${unplaced} unplaced` : "")],
+    ["Average placement", placed.length ? avg.toFixed(2) : "—", `over ${placed.length} placed game(s)`],
+    ["First places", String(firsts),
+     placed.length ? `${Math.round(100 * firsts / placed.length)}% of ${placed.length} placed` : ""],
     ["Fight winrate", (w + l) ? `${Math.round(100 * w / (w + l))}%` : "—", `${w}W ${l}L`],
   ];
   for (const [label, value, note] of tiles) {

@@ -856,13 +856,18 @@ class TrackerApp:
                     fh.seek(max(0, fh.tell() - 65536))
                     if sig.encode() in fh.read():
                         return
+            # Duos teams share placement — fall back to the teammate's if our
+            # own hero's status was lost (e.g. it left PLAY on death).
+            place = view["statuses"].get(view["friendly"], {}).get("place", 0)
+            if not place and view["teammate"]:
+                place = view["statuses"].get(view["teammate"], {}).get("place", 0)
             rec = {
                 "sig": sig,
                 "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "mode": "duos" if view["teams"] else "solo",
                 "own_pid": view["friendly"],
                 "teammate": view["teammate"],
-                "place": view["statuses"].get(view["friendly"], {}).get("place", 0),
+                "place": place,
                 "teams": view["teams"],
                 "names": view["names"],
                 "heroes": {

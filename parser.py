@@ -508,11 +508,15 @@ class BgGame:
                 continue
             zone, ctrl = ent.tag("ZONE"), ent.tag("CONTROLLER")
             if (
-                zone == "PLAY"
-                and ctrl == self.friendly_controller
+                ctrl == self.friendly_controller
+                and pid == self.friendly_controller
                 and not ent.tag("COPIED_FROM_ENTITY_ID")
             ):
-                rank = 2  # our own live hero
+                # Our own real hero — still authoritative after it leaves
+                # PLAY (death moves it to GRAVEYARD but the tags remain).
+                # Own seat only: other players' copies also land on our
+                # controller with stale default stats.
+                rank = 3 if zone == "PLAY" else 2
             elif zone == "SETASIDE" and ctrl == self.enemy_controller:
                 rank = 1  # leaderboard sync entity
             else:
