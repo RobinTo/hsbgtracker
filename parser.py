@@ -144,6 +144,7 @@ class BgGame:
         self._pending_combat_friendly = 0
         self._last_friendly_pid = 0
         self._pending_friendly_swap = 0
+        self._choice_ids: set[int] = set()  # hero-pick entities seen in HAND
         self.snapshots: dict[int, Snapshot] = {}  # latest per player
         self.history: dict[int, list] = {}  # all snapshots per player, in order
         self.hp_track: list[tuple[int, int]] = []  # (round, our effective hp)
@@ -287,6 +288,17 @@ class BgGame:
         if ent is None:
             return
         ent.tags[tag] = self._intval(value)
+        # Hero choices sit in our HAND during the pick phase. Tag order in
+        # the entity block varies, so trigger on either tag completing the
+        # (HERO, HAND, ours) combination.
+        if (
+            self.turn <= 1
+            and tag in ("ZONE", "CARDTYPE")
+            and ent.tag("CARDTYPE") == "HERO"
+            and ent.tag("ZONE") == "HAND"
+            and ent.tag("CONTROLLER") == self.friendly_controller
+        ):
+            self._choice_ids.add(ent.id)
         if tag == "NEXT_OPPONENT_PLAYER_ID":
             self.next_opponent_id = int(value)
         elif tag == "BACON_CURRENT_COMBAT_PLAYER_ID":
@@ -615,6 +627,16 @@ class BgGame:
                 # Prefer an entity we have a display name for.
                 if pid not in out or (ent.name and not out[pid].name):
                     out[pid] = ent
+        return out
+
+    def hero_choices(self):
+        """Heroes offered at the start of the game:
+        [(card_id, name, hero_power_dbf)]."""
+        out = []
+        for eid in sorted(self._choice_ids):
+            ent = self.entities.get(eid)
+            if ent is not None and ent.card_id:
+                out.append((ent.card_id, ent.name, ent.tag("HERO_POWER", 0) or 0))
         return out
 
     def duo_teams(self):

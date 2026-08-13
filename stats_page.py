@@ -45,6 +45,11 @@ def build_html(cards: CardDb | None = None) -> str:
             ]
         hp_track = g.get("hp_track", [])
         rounds = hp_track[-1][0] if hp_track else (final["round_num"] if final else 0)
+        hero_card = ""
+        for s in snaps:
+            if s.get("hero_card_id"):
+                hero_card = s["hero_card_id"].split("_SKIN_")[0]
+                break
         fights = [
             {
                 "r": s["round_num"],
@@ -61,6 +66,7 @@ def build_html(cards: CardDb | None = None) -> str:
                 "ts": g.get("ts", ""),
                 "mode": g.get("mode", "?"),
                 "hero": g.get("heroes", {}).get(str(g.get("own_pid")), "?"),
+                "heroCard": hero_card,
                 "place": g.get("place", 0),
                 "rounds": rounds,
                 "tribe": tribe,

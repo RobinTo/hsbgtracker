@@ -101,6 +101,10 @@
       <h2>Fight record by round</h2>
       <div id="roundrec"></div>
     </div>
+    <div class="card wide">
+      <h2>Average placement by hero</h2>
+      <div id="heroes"></div>
+    </div>
     <div class="card">
       <h2>Minions in winning final boards <span style="color:var(--muted);font-weight:400">(#1 finishes)</span></h2>
       <div id="winMinions"></div>
@@ -299,6 +303,23 @@ function renderTribes(gs) {
     v => v.toFixed(2), 8);
 }
 
+function renderHeroes(gs) {
+  const byHero = new Map();  // key: base hero card (skins fold together)
+  for (const g of gs) {
+    if (!g.place) continue;
+    const key = g.heroCard || g.hero;
+    if (!byHero.has(key)) byHero.set(key, { name: g.hero, places: [] });
+    byHero.get(key).places.push(g.place);
+  }
+  const rows = [...byHero.values()]
+    .map(h => ({ label: h.name, value: h.places.reduce((a, b) => a + b, 0) / h.places.length,
+                 note: `(${h.places.length})` }))
+    .sort((a, b) => a.value - b.value);
+  renderBars("heroes", rows, S1,
+    r => [`avg #${r.value.toFixed(2)}`, `${r.label} · ${r.note.replace(/[()]/g, "")} game(s)`],
+    v => v.toFixed(2), 8);
+}
+
 function renderRoundRecord(gs) {
   // Win/loss counts bucketed by round: early (1-4), mid (5-8), late (9+)
   const buckets = [["r1–4", 1, 4], ["r5–8", 5, 8], ["r9+", 9, 99]];
@@ -491,6 +512,7 @@ function render() {
   renderTiles(gs);
   renderTimeline(gs);
   renderTribes(gs);
+  renderHeroes(gs);
   renderRoundRecord(gs);
   renderMinions(gs);
   renderRoundMinions(gs);

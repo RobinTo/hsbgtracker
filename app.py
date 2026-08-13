@@ -25,6 +25,42 @@ POLL_SECONDS = 1.0
 CONFIG_FILE = Path(__file__).with_name("tracker_config.json")
 HISTORY_FILE = Path(__file__).with_name("games_history.jsonl")
 
+SKIN_RE = __import__("re").compile(r"_SKIN_.*$")
+
+
+def base_hero(card_id: str) -> str:
+    """Skins are the same hero: BG20_HERO_202_SKIN_D -> BG20_HERO_202."""
+    return SKIN_RE.sub("", card_id or "")
+
+
+def load_career() -> dict:
+    """Per-hero career from games_history.jsonl:
+    {base_card: {"name": str, "places": [int, ...]}}"""
+    import json as _json
+
+    out: dict = {}
+    try:
+        for line in HISTORY_FILE.read_text(encoding="utf-8").splitlines():
+            try:
+                g = _json.loads(line)
+            except _json.JSONDecodeError:
+                continue
+            own = g.get("history", {}).get(str(g.get("own_pid")), [])
+            card = ""
+            for s in own:
+                if s.get("hero_card_id"):
+                    card = base_hero(s["hero_card_id"])
+                    break
+            if not card:
+                continue
+            hero_name = g.get("heroes", {}).get(str(g.get("own_pid")), "")
+            rec = out.setdefault(card, {"name": hero_name, "places": []})
+            if g.get("place"):
+                rec["places"].append(g["place"])
+    except OSError:
+        pass
+    return out
+
 TRIBE_ICONS = {
     "Beast": "🐾",
     "Demon": "😈",
@@ -307,6 +343,7 @@ class TrackerApp:
         self._last_click = 0.0  # manual pin/round clicks pause auto-select
         self._prev_next_opp = 0
         self._recap_shown = False
+        self._career = load_career()
 
         root.title("BG Tracker")
         root.configure(bg=BG)
@@ -521,6 +558,7 @@ class TrackerApp:
                 "turn": self.game.turn,
                 "hp_track": list(self.game.hp_track),
                 "anomaly": self.game.anomaly_dbf,
+                "choices": self.game.hero_choices(),
             }
             self.cards.learn_all(self.game.learned_names)
         self._view = view
@@ -868,6 +906,10 @@ class TrackerApp:
                 "own_pid": view["friendly"],
                 "teammate": view["teammate"],
                 "place": place,
+                "choices": [
+                    {"card": c, "n": n or self.cards.name(c)}
+                    for c, n, _p in view.get("choices", [])
+                ],
                 "teams": view["teams"],
                 "names": view["names"],
                 "heroes": {
@@ -882,6 +924,7 @@ class TrackerApp:
             }
             with open(HISTORY_FILE, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            self._career = load_career()
         except Exception:
             pass  # never let stats bookkeeping break the tracker
 
@@ -915,6 +958,14 @@ class TrackerApp:
         if view is None:
             return
         pid = self._shown_pid()
+        if (
+            view["in_bg"]
+            and not view["game_over"]
+            and view["choices"]
+            and view["friendly"] not in view["heroes"]
+        ):
+            self._update_detail_choices(view)
+            return
         if pid is None and view["game_over"] and view["hp_track"]:
             self._update_detail_recap(view)
             return
@@ -1018,6 +1069,48 @@ class TrackerApp:
             return
         for m in snap.minions:
             self._minion_row(self.detail, m)
+
+    # -------------------------------------------------------- hero pick panel
+
+    def _update_detail_choices(self, view):
+        key = ("choices", tuple(c[0] for c in view["choices"]))
+        if key == self._detail_key:
+            return
+        self._detail_key = key
+        self.tooltip.hide()
+        for w in self.detail.winfo_children():
+            w.destroy()
+        self.detail_title.configure(text="Hero pick — your record with each option")
+
+        for cid, name, power_dbf in view["choices"]:
+            row = tk.Frame(self.detail, bg=BG_ROW, height=36)
+            row.pack(fill="x", padx=4, pady=2)
+            row.pack_propagate(False)
+
+            c = tk.Canvas(row, width=64, height=30, bg=BG_ROW, highlightthickness=0)
+            c.pack(side="left", padx=(4, 8), pady=3)
+            img = self.art.get_tile_small(cid)
+            if img is not None:
+                c.create_image(64, 15, image=img, anchor="e")
+                c.image = img
+
+            career = self._career.get(base_hero(cid))
+            display = name or self.cards.name(cid)
+            tk.Label(row, text=display, bg=BG_ROW, fg=FG,
+                     font=("Segoe UI", 10, "bold"), anchor="w").pack(side="left")
+            if career and career["places"]:
+                ps = career["places"]
+                stat = f"{len(ps)} game(s) · avg #{sum(ps) / len(ps):.1f}"
+                if 1 in ps:
+                    stat += f" · {ps.count(1)}× first"
+            else:
+                stat = "never played"
+            tk.Label(row, text=stat, bg=BG_ROW, fg=FG_DIM,
+                     font=("Segoe UI", 9)).pack(side="right", padx=8)
+
+            tip_cid = self.cards.card_by_dbf(power_dbf) if power_dbf else ""
+            for w in (row, c):
+                self.tooltip.attach(w, tip_cid or cid)
 
     # ---------------------------------------------------- self view and recap
 
