@@ -109,6 +109,18 @@ class ArtStore:
             self._q.put((kind, url_tpl, aid))
         return None  # caller shows placeholder; on_new fires when ready
 
+    def clear_misses(self):
+        """Forget remembered 404s (a new patch usually means the CDN gained
+        art for cards it lacked). Cached art itself stays valid."""
+        for kind in ("tiles", "renders", "orig"):
+            for f in (CACHE_DIR / kind).glob("*.404"):
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+        self._photos = {k: v for k, v in self._photos.items() if v is not None}
+        self._queued.clear()
+
     # -------------------------------------------------------- worker thread
 
     def _worker(self):

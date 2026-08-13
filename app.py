@@ -104,6 +104,20 @@ def read_game_patch(log_dir: Path | None) -> str:
     return ""
 
 
+def load_config() -> dict:
+    try:
+        return json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_config(cfg: dict):
+    try:
+        CONFIG_FILE.write_text(json.dumps(cfg), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def load_career() -> dict:
     """Per-hero career from games_history.jsonl:
     {base_card: {"name": str, "places": [int, ...]}}"""
@@ -440,20 +454,13 @@ class TrackerApp:
 
     @staticmethod
     def _load_geometry() -> str | None:
-        try:
-            cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-            return cfg.get("geometry")
-        except (OSError, json.JSONDecodeError):
-            return None
+        return load_config().get("geometry")
 
     def _save_geometry(self):
         self._geom_save_job = None
-        try:
-            CONFIG_FILE.write_text(
-                json.dumps({"geometry": self.root.geometry()}), encoding="utf-8"
-            )
-        except OSError:
-            pass
+        cfg = load_config()
+        cfg["geometry"] = self.root.geometry()
+        save_config(cfg)
 
     def _on_configure(self, event):
         if event.widget is not self.root:
@@ -526,6 +533,30 @@ class TrackerApp:
         self.pinned_pid = None
         self._detail_sel = None
         self.dirty.set()
+
+    # -------------------------------------------------- patch-driven caches
+
+    def _check_patch(self):
+        """On a new game patch: refresh the card DB (stats/text change on
+        balance patches) and retry art the CDN previously lacked."""
+        log_dir = self.tailer.current.parent if (
+            self.tailer and self.tailer.current
+        ) else None
+        if log_dir is None or self._patch_cache[0] == log_dir:
+            return
+        self._patch_cache = (log_dir, read_game_patch(log_dir))
+        patch = self._patch_cache[1]
+        if not patch:
+            return
+        cfg = load_config()
+        known = cfg.get("last_patch")
+        if known == patch:
+            return
+        cfg["last_patch"] = patch
+        save_config(cfg)
+        if known:  # first run just records; later changes invalidate
+            self.cards.ensure_downloaded(force=True)
+            self.art.clear_misses()
 
     # ------------------------------------------------------ game persistence
 
@@ -763,6 +794,7 @@ class TrackerApp:
             self.cards.learn_all(self.game.learned_names)
         self._view = view
         self._last_data = time.time()
+        self._check_patch()
 
         if view["game_over"] and view["in_bg"] and view["heroes"]:
             if not self._recap_shown:

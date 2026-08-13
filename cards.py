@@ -57,9 +57,11 @@ class CardDb:
         except (OSError, json.JSONDecodeError, KeyError):
             pass
 
-    def ensure_downloaded(self, on_done=None):
-        """Fetch HearthstoneJSON in a background thread if not cached yet."""
-        if self._cards:
+    def ensure_downloaded(self, on_done=None, force=False):
+        """Fetch HearthstoneJSON in a background thread if not cached yet.
+        force=True re-downloads (used on a new game patch); the old data
+        keeps serving until the fresh set swaps in."""
+        if self._cards and not force:
             if on_done:
                 on_done(True)
             return
