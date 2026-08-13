@@ -22,6 +22,7 @@ import tkinter as tk
 CACHE_DIR = Path(__file__).with_name("images_cache")
 TILE_URL = "https://art.hearthstonejson.com/v1/tiles/{}.png"
 RENDER_URL = "https://art.hearthstonejson.com/v1/render/latest/enUS/256x/{}.png"
+ORIG_URL = "https://art.hearthstonejson.com/v1/orig/{}.png"  # 512x512 art
 
 # Tile display scale: 256x59 * 3/4 -> 192x44
 TILE_ZOOM, TILE_SUB = 3, 4
@@ -40,6 +41,7 @@ class ArtStore:
         self._q: queue.Queue = queue.Queue()
         (CACHE_DIR / "tiles").mkdir(parents=True, exist_ok=True)
         (CACHE_DIR / "renders").mkdir(parents=True, exist_ok=True)
+        (CACHE_DIR / "orig").mkdir(parents=True, exist_ok=True)
         threading.Thread(target=self._worker, daemon=True).start()
 
     # ------------------------------------------------------------ tk thread
@@ -53,6 +55,18 @@ class ArtStore:
 
     def get_render(self, card_id: str) -> tk.PhotoImage | None:
         return self._get("renders", RENDER_URL, card_id, scale=None)
+
+    def get_portrait(self, card_id: str) -> tk.PhotoImage | None:
+        """512x512 original art at 128x128 — callers crop via canvas clipping."""
+        return self._get("orig", ORIG_URL, card_id, scale=(1, 4), variant="p")
+
+    def get_thumb(self, card_id: str) -> tk.PhotoImage | None:
+        """512x512 original art at ~51x51 for lobby board strips."""
+        return self._get("orig", ORIG_URL, card_id, scale=(1, 10), variant="t")
+
+    def get_face(self, card_id: str) -> tk.PhotoImage | None:
+        """~26x26 hero face for lobby rows."""
+        return self._get("orig", ORIG_URL, card_id, scale=(1, 19), variant="f")
 
     def _get(self, kind, url_tpl, card_id, scale, variant=""):
         aid = _art_id(card_id)
