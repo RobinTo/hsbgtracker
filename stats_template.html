@@ -85,6 +85,7 @@
   <div class="sub" id="generated"></div>
 
   <div class="filters" id="modeFilter" role="group" aria-label="Mode filter"></div>
+  <div class="filters" id="patchFilter" role="group" aria-label="Patch filter" style="margin-top:-8px"></div>
 
   <div class="tiles" id="tiles"></div>
 
@@ -187,8 +188,24 @@ for (const [key, label] of [["all", "All"], ["solo", "Solo"], ["duos", "Duos"]])
   filterBox.appendChild(b);
 }
 
+let patch = "all";
+const patchBox = document.getElementById("patchFilter");
+{
+  const patches = [...new Set(DATA.games.map(g => g.patch).filter(Boolean))].sort().reverse();
+  if (patches.length > 1 || (patches.length === 1 && DATA.games.some(g => !g.patch))) {
+    for (const [key, label] of [["all", "All patches"], ...patches.map(p => [p, "patch " + p])]) {
+      const b = document.createElement("button");
+      b.textContent = label;
+      b.dataset.patch = key;
+      b.addEventListener("click", () => { patch = key; render(); });
+      patchBox.appendChild(b);
+    }
+  }
+}
+
 function games() {
-  return DATA.games.filter(g => mode === "all" || g.mode === mode);
+  return DATA.games.filter(g =>
+    (mode === "all" || g.mode === mode) && (patch === "all" || g.patch === patch));
 }
 
 // -------------------------------------------------------------------- tiles
@@ -508,6 +525,7 @@ function renderTable(gs) {
 // ------------------------------------------------------------------- render
 function render() {
   for (const b of filterBox.children) b.classList.toggle("on", b.dataset.mode === mode);
+  for (const b of patchBox.children) b.classList.toggle("on", b.dataset.patch === patch);
   const gs = games();
   renderTiles(gs);
   renderTimeline(gs);

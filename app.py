@@ -33,6 +33,25 @@ def base_hero(card_id: str) -> str:
     return SKIN_RE.sub("", card_id or "")
 
 
+VERSION_RE = __import__("re").compile(r"BattleNet version: Product = ([\d.]+)")
+
+
+def read_game_patch(log_dir: Path | None) -> str:
+    """Client patch (e.g. '36.2.0') from the session's Hearthstone.log."""
+    if log_dir is None:
+        return ""
+    try:
+        with open(log_dir / "Hearthstone.log", encoding="utf-8", errors="replace") as fh:
+            head = fh.read(65536)
+        m = VERSION_RE.search(head)
+        if m:
+            v = m.group(1)
+            return v[:-2] if v.endswith(".0") and v.count(".") == 3 else v
+    except OSError:
+        pass
+    return ""
+
+
 def load_career() -> dict:
     """Per-hero career from games_history.jsonl:
     {base_card: {"name": str, "places": [int, ...]}}"""
@@ -344,6 +363,8 @@ class TrackerApp:
         self._prev_next_opp = 0
         self._recap_shown = False
         self._career = load_career()
+        self.tailer: LogTailer | None = None
+        self._patch_cache: tuple[Path | None, str] = (None, "")
 
         root.title("BG Tracker")
         root.configure(bg=BG)
@@ -368,7 +389,8 @@ class TrackerApp:
             self.status.set("Hearthstone Logs folder not found")
         else:
             self.status.set(f"Watching {logs_dir}")
-            LogTailer(logs_dir, self.game, self.lock, self.dirty.set).start()
+            self.tailer = LogTailer(logs_dir, self.game, self.lock, self.dirty.set)
+            self.tailer.start()
 
         import live_server
         import stats_page
@@ -899,9 +921,15 @@ class TrackerApp:
             place = view["statuses"].get(view["friendly"], {}).get("place", 0)
             if not place and view["teammate"]:
                 place = view["statuses"].get(view["teammate"], {}).get("place", 0)
+            log_dir = self.tailer.current.parent if (
+                self.tailer and self.tailer.current
+            ) else None
+            if self._patch_cache[0] != log_dir:
+                self._patch_cache = (log_dir, read_game_patch(log_dir))
             rec = {
                 "sig": sig,
                 "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "patch": self._patch_cache[1],
                 "mode": "duos" if view["teams"] else "solo",
                 "own_pid": view["friendly"],
                 "teammate": view["teammate"],

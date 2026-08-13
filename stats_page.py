@@ -67,6 +67,7 @@ def build_html(cards: CardDb | None = None) -> str:
                 "mode": g.get("mode", "?"),
                 "hero": g.get("heroes", {}).get(str(g.get("own_pid")), "?"),
                 "heroCard": hero_card,
+                "patch": g.get("patch", ""),
                 "place": g.get("place", 0),
                 "rounds": rounds,
                 "tribe": tribe,
