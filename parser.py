@@ -32,6 +32,10 @@ RE_BRACKET_REF = re.compile(
     r"\[entityName=(?P<name>.*?) id=(?P<id>\d+) zone=\S+ zonePos=\d+ cardId=(?P<card>\S*) player=\d+\]"
 )
 RE_ID_ONLY = re.compile(r"^(?:ID|Entity)=(?P<id>\d+)$")
+RE_ECON = re.compile(
+    r"cardId=(TB_BaconShop_DragBuy(?:_Spell)?|TB_BaconShop_8p_Reroll_Button"
+    r"|TB_BaconShop_DragSell(?:_Spell)?) player=(\d+)\]"
+)
 
 HERO_CARD_PREFIXES = ("TB_BaconShop_HERO", "BG")  # heroes checked via CARDTYPE anyway
 INNKEEPER_CARDS = {"TB_BaconShop_HERO_PH", "TB_BaconShopBob", "TB_BaconShop_HERO_KelThuzad"}
@@ -119,6 +123,8 @@ class BgGame:
                 "snapshots": self.snapshots,
                 "names": self.player_names,
                 "hp_track": self.hp_track,
+                "econ": self.econ,
+                "tier_ups": self.tier_ups,
             }
         self._carryover = carry
         self._first_turn_seen = False
@@ -148,6 +154,8 @@ class BgGame:
         self.snapshots: dict[int, Snapshot] = {}  # latest per player
         self.history: dict[int, list] = {}  # all snapshots per player, in order
         self.hp_track: list[tuple[int, int]] = []  # (round, our effective hp)
+        self.econ = {"buys": 0, "rolls": 0, "sells": 0}  # our shop actions
+        self.tier_ups: list[tuple[int, int]] = []  # (round, tier reached)
         self.anomaly_dbf = 0
         self._combat_snaps: list[Snapshot] = []  # taken during current combat
         self._combat_pre = None  # (our_hp, enemy_hp) at combat start
@@ -231,6 +239,24 @@ class BgGame:
         if m and self._pending_entity is not None:
             self._apply_tag(self._pending_entity, m.group("tag"), m.group("value"))
             return
+
+        # Our shop actions (economy stats). Only our own client's actions
+        # appear as PLAY blocks; turn >= 1 skips the hero-pick phase.
+        if (
+            self.turn >= 1
+            and stripped.startswith("BLOCK_START")
+            and "BlockType=PLAY" in stripped
+            and "TB_BaconShop" in stripped
+        ):
+            m = RE_ECON.search(stripped)
+            if m and int(m.group(2)) == self.friendly_controller:
+                kind = m.group(1)
+                if "DragBuy" in kind:
+                    self.econ["buys"] += 1
+                elif "Reroll" in kind:
+                    self.econ["rolls"] += 1
+                else:
+                    self.econ["sells"] += 1
 
         # A swapped-in or late-placed board is fully placed by the time
         # attacks happen.
@@ -367,12 +393,25 @@ class BgGame:
                     for pid, nm in carry["names"].items():
                         self.player_names.setdefault(pid, nm)
                     self.hp_track = carry["hp_track"] + self.hp_track
+                    for k, n in carry["econ"].items():
+                        self.econ[k] += n
+                    self.tier_ups = carry["tier_ups"] + self.tier_ups
                 self._carryover = None
             self.turn = v
         elif tag == "STEP":
             self._on_step(value)
         elif tag == "BACON_GLOBAL_ANOMALY_DBID" and str(value).isdigit():
             self.anomaly_dbf = int(value)
+        elif tag == "PLAYER_TECH_LEVEL" and str(value).isdigit():
+            lvl = int(value)
+            if (
+                2 <= lvl <= 7
+                and self.turn >= 1
+                and ent.tag("CONTROLLER") == self.friendly_controller
+                and not ent.tag("COPIED_FROM_ENTITY_ID")
+                and lvl > (self.tier_ups[-1][1] if self.tier_ups else 1)
+            ):
+                self.tier_ups.append((self.turn, lvl))
         elif tag == "STATE" and value == "COMPLETE":
             self.game_over = True
             # The final combat has no following shopping turn; settle it now.

@@ -581,6 +581,8 @@ class TrackerApp:
                 "hp_track": list(self.game.hp_track),
                 "anomaly": self.game.anomaly_dbf,
                 "choices": self.game.hero_choices(),
+                "econ": dict(self.game.econ),
+                "tier_ups": list(self.game.tier_ups),
             }
             self.cards.learn_all(self.game.learned_names)
         self._view = view
@@ -938,6 +940,8 @@ class TrackerApp:
                     {"card": c, "n": n or self.cards.name(c)}
                     for c, n, _p in view.get("choices", [])
                 ],
+                "econ": view.get("econ", {}),
+                "tierUps": view.get("tier_ups", []),
                 "teams": view["teams"],
                 "names": view["names"],
                 "heroes": {

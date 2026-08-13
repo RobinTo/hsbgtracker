@@ -50,6 +50,15 @@ def build_html(cards: CardDb | None = None) -> str:
             if s.get("hero_card_id"):
                 hero_card = s["hero_card_id"].split("_SKIN_")[0]
                 break
+        tier_ups = g.get("tierUps") or []
+        if not tier_ups:
+            # Older records: derive tier timings from our own snapshots.
+            last = 1
+            for s in snaps:
+                lvl = s.get("tech_level", 0)
+                if lvl > last:
+                    tier_ups.append([s["round_num"], lvl])
+                    last = lvl
         fights = [
             {
                 "r": s["round_num"],
@@ -72,6 +81,8 @@ def build_html(cards: CardDb | None = None) -> str:
                 ),
                 "heroCard": hero_card,
                 "patch": g.get("patch", ""),
+                "econ": g.get("econ"),  # null on records from before v2.3
+                "tierUps": tier_ups,
                 "place": g.get("place", 0),
                 "rounds": rounds,
                 "tribe": tribe,
