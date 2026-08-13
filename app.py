@@ -756,7 +756,8 @@ class TrackerApp:
             return
         age = max(0, int(time.time() - self._last_data))
         mode = "duos" if view["teams"] else "solo"
-        txt = f"in game · {mode} · round {view['turn']} · updated {age}s ago"
+        state = "spectating" if view.get("spectating") else "in game"
+        txt = f"{state} · {mode} · round {view['turn']} · updated {age}s ago"
         if view["anomaly"]:
             aid = self.cards.card_by_dbf(view["anomaly"])
             if aid:
@@ -790,6 +791,7 @@ class TrackerApp:
                 "choosing": self.game.is_choosing(),
                 "econ": dict(self.game.econ),
                 "tier_ups": list(self.game.tier_ups),
+                "spectating": self.game.spectating,
             }
             self.cards.learn_all(self.game.learned_names)
         self._view = view
@@ -800,7 +802,8 @@ class TrackerApp:
             if not self._recap_shown:
                 self._recap_shown = True
                 self.pinned_pid = None
-                self._persist_game(view)
+                if not view["spectating"]:  # spectated games never enter stats
+                    self._persist_game(view)
         else:
             self._recap_shown = False
 

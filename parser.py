@@ -111,6 +111,9 @@ class BgGame:
         self.on_new_game = on_new_game  # callback()
         self.debug = debug
         self.learned_names: dict[str, str] = {}  # card_id -> name, survives games
+        # Toggled by the "Begin Spectating"/"End Spectator" banner lines,
+        # which arrive before CREATE_GAME — so it lives outside _reset().
+        self.spectating = False
         self._reset()
 
     def _reset(self):
@@ -166,6 +169,11 @@ class BgGame:
     # ------------------------------------------------------------------ input
 
     def feed_line(self, line: str):
+        if "pectat" in line:  # cheap guard; the banners are rare
+            if "Begin Spectating" in line:
+                self.spectating = True
+            elif "End Spectator" in line:
+                self.spectating = False
         m = RE_LINE.match(line)
         if not m:
             return
