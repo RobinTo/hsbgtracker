@@ -1123,7 +1123,13 @@ class TrackerApp:
                 c.image = img
 
             career = self._career.get(base_hero(cid))
-            display = name or self.cards.name(cid)
+            base = base_hero(cid)
+            # Base-card name, so skins ("Tavish Drizzle Pike") display as
+            # the hero they are ("Tavish Stormpike").
+            if self.cards.known(base):
+                display = self.cards.name(base)
+            else:
+                display = name or self.cards.name(cid)
             tk.Label(row, text=display, bg=BG_ROW, fg=FG,
                      font=("Segoe UI", 10, "bold"), anchor="w").pack(side="left")
             if career and career["places"]:

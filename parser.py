@@ -212,8 +212,11 @@ class BgGame:
             ent = self._resolve(m.group("ref"))
             if ent is not None:
                 card = m.group("card").strip()
-                if card:
+                if card and card != ent.card_id:
+                    # Transformed into a different card (e.g. hero-pick
+                    # reroll): the old display name no longer applies.
                     ent.card_id = card
+                    ent.name = ""
             self._pending_entity = None
             return
 

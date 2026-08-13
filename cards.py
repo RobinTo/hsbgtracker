@@ -121,6 +121,9 @@ class CardDb:
                     return self._cards[cid]
         return None
 
+    def known(self, card_id: str) -> bool:
+        return self._entry(card_id) is not None
+
     def name(self, card_id: str, fallback: str = "") -> str:
         if fallback:
             return fallback

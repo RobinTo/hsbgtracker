@@ -65,7 +65,11 @@ def build_html(cards: CardDb | None = None) -> str:
             {
                 "ts": g.get("ts", ""),
                 "mode": g.get("mode", "?"),
-                "hero": g.get("heroes", {}).get(str(g.get("own_pid")), "?"),
+                "hero": (
+                    cards.name(hero_card)
+                    if hero_card and cards.known(hero_card)
+                    else g.get("heroes", {}).get(str(g.get("own_pid")), "?")
+                ),
                 "heroCard": hero_card,
                 "patch": g.get("patch", ""),
                 "place": g.get("place", 0),
