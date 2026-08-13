@@ -179,8 +179,8 @@ def enable_dark_titlebar(root: tk.Tk):
         pass
 
 
-def find_logs_dir() -> Path | None:
-    candidates = []
+def _install_dirs() -> list[Path]:
+    out = []
     try:
         import winreg
 
@@ -191,18 +191,28 @@ def find_logs_dir() -> Path | None:
             try:
                 with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, hive_path) as key:
                     loc, _ = winreg.QueryValueEx(key, "InstallLocation")
-                    candidates.append(Path(loc) / "Logs")
+                    out.append(Path(loc))
             except OSError:
                 pass
     except ImportError:
         pass
-    candidates += [
-        Path(r"C:\Program Files (x86)\Hearthstone\Logs"),
-        Path(r"C:\Program Files\Hearthstone\Logs"),
-    ]
-    for c in candidates:
-        if c.is_dir():
-            return c
+    out += [Path(r"C:\Program Files (x86)\Hearthstone"),
+            Path(r"C:\Program Files\Hearthstone")]
+    return out
+
+
+def find_logs_dir() -> Path | None:
+    for c in _install_dirs():
+        if (c / "Logs").is_dir():
+            return c / "Logs"
+    return None
+
+
+def find_hs_exe() -> Path | None:
+    for c in _install_dirs():
+        exe = c / "Hearthstone.exe"
+        if exe.is_file():
+            return exe
     return None
 
 
@@ -398,6 +408,10 @@ class TrackerApp:
         self.tailer: LogTailer | None = None
         self._patch_cache: tuple[Path | None, str] = (None, "")
         self._last_data = 0.0
+        self._hs_exe = find_hs_exe()
+        self._disc_until = 0.0
+        self._disc_leftover = False
+        threading.Thread(target=self._check_leftover_rule, daemon=True).start()
 
         root.title("BG Tracker")
         root.configure(bg=BG)
@@ -533,6 +547,45 @@ class TrackerApp:
         self.pinned_pid = None
         self._detail_sel = None
         self.dirty.set()
+
+    # ------------------------------------------------- disconnect (firewall)
+
+    def _check_leftover_rule(self):
+        """A crashed helper could leave the block rule behind — detect it so
+        the button offers a one-click (elevated) cleanup."""
+        try:
+            import reconnect
+
+            self._disc_leftover = reconnect.rule_exists()
+        except Exception:
+            pass
+
+    def _disconnect(self):
+        """Block Hearthstone's outbound traffic for a few seconds via an
+        elevated helper (one UAC prompt); the helper itself restores the
+        connection, so the tracker crashing can't leave you offline."""
+        if self._hs_exe is None or time.time() < self._disc_until:
+            return
+        try:
+            import ctypes
+            import sys
+
+            helper = Path(__file__).with_name("reconnect.py")
+            secs = float(load_config().get("disconnect_seconds", 6))
+            if self._disc_leftover:
+                args = f'"{helper}" --exe "{self._hs_exe}" --clear'
+            else:
+                args = f'"{helper}" --exe "{self._hs_exe}" --seconds {secs}'
+            rc = ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", sys.executable, args, None, 0
+            )
+            if rc > 32:  # UAC accepted
+                if self._disc_leftover:
+                    self._disc_leftover = False
+                else:
+                    self._disc_until = time.time() + secs
+        except Exception:
+            pass
 
     # -------------------------------------------------- patch-driven caches
 
@@ -709,6 +762,13 @@ class TrackerApp:
                              font=(UI, 9), cursor="hand2")
         recap_btn.pack(side="right", padx=(0, 12))
         recap_btn.bind("<Button-1>", lambda _e: self._clear_selection())
+        if self._hs_exe is not None:
+            self.disc_btn = tk.Label(inner, text="⏻ disconnect", bg=BG_BAR,
+                                     fg=FG_DIM, font=(UI, 9), cursor="hand2")
+            self.disc_btn.pack(side="right", padx=(0, 12))
+            self.disc_btn.bind("<Button-1>", lambda _e: self._disconnect())
+        else:
+            self.disc_btn = None
 
         holder = tk.Canvas(self.root, bg=BG, highlightthickness=0)
         scroll = tk.Scrollbar(self.root, orient="vertical", command=holder.yview, width=8)
@@ -743,6 +803,15 @@ class TrackerApp:
         self.root.after(400, self._poll)
 
     def _tick_status(self):
+        if self.disc_btn is not None:
+            remaining = self._disc_until - time.time()
+            if remaining > 0:
+                self.disc_btn.configure(text=f"⏻ offline {int(remaining) + 1}s",
+                                        fg=ACCENT)
+            elif self._disc_leftover:
+                self.disc_btn.configure(text="⚠ clear disconnect rule", fg=ACCENT)
+            else:
+                self.disc_btn.configure(text="⏻ disconnect", fg=FG_DIM)
         view = self._view
         if not view or not view["in_bg"] or not view["heroes"]:
             self.status_dot.configure(bg=FAINT)
