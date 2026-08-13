@@ -33,6 +33,18 @@ def _art_id(card_id: str) -> str:
     return card_id.removesuffix("_G")  # golden variants share base art
 
 
+def _crop_center(img: tk.PhotoImage, w: int, h: int) -> tk.PhotoImage:
+    """Exact-size center crop (drops the white margins painted into art)."""
+    iw, ih = img.width(), img.height()
+    cw, ch = min(w, iw), min(h, ih)
+    if cw == iw and ch == ih:
+        return img
+    x1, y1 = (iw - cw) // 2, (ih - ch) // 2
+    out = tk.PhotoImage(width=cw, height=ch)
+    out.tk.call(str(out), "copy", str(img), "-from", x1, y1, x1 + cw, y1 + ch)
+    return out
+
+
 class ArtStore:
     def __init__(self, on_new=None):
         self.on_new = on_new  # called (from worker thread) when a file lands
@@ -57,18 +69,22 @@ class ArtStore:
         return self._get("renders", RENDER_URL, card_id, scale=None)
 
     def get_portrait(self, card_id: str) -> tk.PhotoImage | None:
-        """512x512 original art at 128x128 — callers crop via canvas clipping."""
-        return self._get("orig", ORIG_URL, card_id, scale=(1, 4), variant="p")
+        """512x512 original art at ~170px — oversized so the canvas crop cuts
+        off the white margins painted into the source art."""
+        return self._get("orig", ORIG_URL, card_id, scale=(1, 3), variant="p")
 
     def get_thumb(self, card_id: str) -> tk.PhotoImage | None:
-        """512x512 original art at ~51x51 for lobby board strips."""
-        return self._get("orig", ORIG_URL, card_id, scale=(1, 10), variant="t")
+        """Lobby board thumb: art scaled to ~73px, center-cropped to 48x60
+        so the source's painted margins are gone."""
+        return self._get("orig", ORIG_URL, card_id, scale=(1, 7), variant="t",
+                         crop=(48, 60))
 
     def get_face(self, card_id: str) -> tk.PhotoImage | None:
-        """~26x26 hero face for lobby rows."""
-        return self._get("orig", ORIG_URL, card_id, scale=(1, 19), variant="f")
+        """Hero face for lobby rows: ~30px art cropped to 26x26."""
+        return self._get("orig", ORIG_URL, card_id, scale=(1, 17), variant="f",
+                         crop=(26, 26))
 
-    def _get(self, kind, url_tpl, card_id, scale, variant=""):
+    def _get(self, kind, url_tpl, card_id, scale, variant="", crop=None):
         aid = _art_id(card_id)
         key = (kind + variant, aid)
         if key in self._photos:
@@ -82,6 +98,8 @@ class ArtStore:
                 img = tk.PhotoImage(file=str(path))
                 if scale:
                     img = img.zoom(scale[0]).subsample(scale[1])
+                if crop:
+                    img = _crop_center(img, *crop)
                 self._photos[key] = img
             except tk.TclError:
                 self._photos[key] = None

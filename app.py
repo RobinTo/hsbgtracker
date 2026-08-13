@@ -1249,7 +1249,7 @@ class TrackerApp:
                            anchor="w")
             sub.pack(fill="x")
 
-            thumbs = tk.Canvas(row, width=7 * 42 - 2, height=50, bg=bgc,
+            thumbs = tk.Canvas(row, width=7 * 50 - 2, height=60, bg=bgc,
                                highlightthickness=0)
             thumbs.pack(side="left", pady=7)
 
@@ -1343,26 +1343,31 @@ class TrackerApp:
                 refs["snap_id"] = snap_key
                 self._draw_thumbs(refs["thumbs"], minions)
 
+    THUMB_W, THUMB_H = 48, 60
+
     def _draw_thumbs(self, c: tk.Canvas, minions):
+        tw, th = self.THUMB_W, self.THUMB_H
+        step = tw + 2
         c.delete("all")
         c.images = []
         for i in range(7):
-            x = i * 42
+            x = i * step
             if minions and i < len(minions):
                 m = minions[i]
                 img = self.art.get_thumb(m.card_id)
                 if img is not None:
-                    c.create_image(x + 20, 25, image=img)
+                    c.create_image(x + tw // 2, th // 2, image=img)
                     c.images.append(img)
                 else:
-                    c.create_rectangle(x + 1, 1, x + 39, 49, fill="#24241f", outline="")
+                    c.create_rectangle(x + 1, 1, x + tw - 1, th - 1,
+                                       fill="#24241f", outline="")
                 c.create_rectangle(
-                    x + 1, 1, x + 39, 49,
+                    x + 1, 1, x + tw - 1, th - 1,
                     outline=GOLD if m.golden else EDGE,
                     width=2 if m.golden else 1,
                 )
             else:
-                c.create_rectangle(x + 1, 1, x + 39, 49, outline="#2f2f2b",
+                c.create_rectangle(x + 1, 1, x + tw - 1, th - 1, outline="#2f2f2b",
                                    dash=(2, 2))
 
 
