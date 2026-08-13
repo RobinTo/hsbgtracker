@@ -581,6 +581,7 @@ class TrackerApp:
                 "hp_track": list(self.game.hp_track),
                 "anomaly": self.game.anomaly_dbf,
                 "choices": self.game.hero_choices(),
+                "choosing": self.game.is_choosing(),
                 "econ": dict(self.game.econ),
                 "tier_ups": list(self.game.tier_ups),
             }
@@ -994,7 +995,7 @@ class TrackerApp:
             view["in_bg"]
             and not view["game_over"]
             and view["choices"]
-            and view["friendly"] not in view["heroes"]
+            and view["choosing"]
         ):
             self._update_detail_choices(view)
             return

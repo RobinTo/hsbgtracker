@@ -681,6 +681,14 @@ class BgGame:
                 out.append((ent.card_id, ent.name, ent.tag("HERO_POWER", 0) or 0))
         return out
 
+    def is_choosing(self) -> bool:
+        """True while the hero pick is still open (choices sit in HAND)."""
+        return any(
+            self.entities[eid].tag("ZONE") == "HAND"
+            for eid in self._choice_ids
+            if eid in self.entities
+        )
+
     def duo_teams(self):
         """Duos: lobby player id -> team id (empty dict in solo games)."""
         out = {}
