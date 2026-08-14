@@ -239,7 +239,9 @@ class LogTailer(threading.Thread):
             self._close()
             self.current = newest
             self._fh = open(newest, encoding="utf-8", errors="replace")
-            self._fh.seek(self._last_game_offset(newest))
+            offset = self._last_game_offset(newest)
+            self._prime_spectator(newest, offset)
+            self._fh.seek(offset)
         if self._fh is None:
             return
         pos = self._fh.tell()
@@ -256,6 +258,20 @@ class LogTailer(threading.Thread):
                 fed = True
         if fed:
             self.on_change()
+
+    def _prime_spectator(self, path: Path, offset: int):
+        """The spectator banner precedes CREATE_GAME, so seeking to the last
+        game would skip it — recover the flag from the bytes just before."""
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(max(0, offset - 65536))
+                window = fh.read(min(offset, 65536))
+            begin = window.rfind(b"Begin Spectating")
+            end = window.rfind(b"End Spectator")
+            with self.lock:
+                self.game.spectating = begin > end  # -1 when absent
+        except OSError:
+            pass
 
     @staticmethod
     def _last_game_offset(path: Path) -> int:
@@ -386,6 +402,11 @@ class TrackerApp:
         self.tooltip = Tooltip(root, self.cards, self.art)
         self.pinned_pid: int | None = None
 
+        cfg = load_config()
+        self.collapsed = bool(cfg.get("collapsed"))
+        self.mini_prev = False  # mini mode: show previous opponent instead
+        self._last_opp = 0  # pid of the opponent before the current pairing
+
         self._hero_key = None
         self._detail_sel: tuple[int, int] | None = None  # (pid, history index)
         self._lobby_key = None
@@ -401,15 +422,19 @@ class TrackerApp:
 
         root.title("BG Tracker")
         root.configure(bg=BG)
-        geom = self._load_geometry() or "760x860"
-        # The board layout needs width; widen a remembered narrow window.
-        try:
-            if int(geom.split("x")[0]) < 720:
-                geom = "760x" + geom.split("x", 1)[1]
-        except (ValueError, IndexError):
-            pass
-        root.geometry(geom)
-        root.minsize(600, 480)
+        if self.collapsed:
+            root.geometry(cfg.get("geometry_mini") or self.MINI_GEOM)
+            root.minsize(*self.MINI_MINSIZE)
+        else:
+            geom = cfg.get("geometry") or "760x860"
+            # The board layout needs width; widen a remembered narrow window.
+            try:
+                if int(geom.split("x")[0]) < 720:
+                    geom = "760x" + geom.split("x", 1)[1]
+            except (ValueError, IndexError):
+                pass
+            root.geometry(geom)
+            root.minsize(600, 480)
         root.attributes("-topmost", True)
         set_app_identity(root)
         enable_dark_titlebar(root)
@@ -452,14 +477,13 @@ class TrackerApp:
 
     # ------------------------------------------------------- window geometry
 
-    @staticmethod
-    def _load_geometry() -> str | None:
-        return load_config().get("geometry")
+    MINI_GEOM = "410x190"
+    MINI_MINSIZE = (310, 120)
 
     def _save_geometry(self):
         self._geom_save_job = None
         cfg = load_config()
-        cfg["geometry"] = self.root.geometry()
+        cfg["geometry_mini" if self.collapsed else "geometry"] = self.root.geometry()
         save_config(cfg)
 
     def _on_configure(self, event):
@@ -472,6 +496,31 @@ class TrackerApp:
     def _on_close(self):
         self._save_geometry()
         self.root.destroy()
+
+    def _toggle_mini(self):
+        cfg = load_config()
+        cfg["geometry_mini" if self.collapsed else "geometry"] = self.root.geometry()
+        self.collapsed = not self.collapsed
+        cfg["collapsed"] = self.collapsed
+        save_config(cfg)
+        if self.collapsed:
+            self._lobby_scroll.pack_forget()
+            self._lobby_canvas.pack_forget()
+            self.root.minsize(*self.MINI_MINSIZE)
+            # First collapse: default size, but stay where the window is.
+            pos = self.root.geometry().split("+", 1)
+            geom = cfg.get("geometry_mini") or (
+                self.MINI_GEOM + ("+" + pos[1] if len(pos) > 1 else ""))
+        else:
+            self._lobby_scroll.pack(side="right", fill="y")
+            self._lobby_canvas.pack(fill="both", expand=True)
+            self.root.minsize(600, 480)
+            geom = cfg.get("geometry") or "760x860"
+        self.root.geometry(geom)
+        self._mode_btn.configure(text="full" if self.collapsed else "mini")
+        self._hero_key = None
+        self._lobby_key = None
+        self.dirty.set()
 
     # -------------------------------------------------------------- keyboard
 
@@ -562,14 +611,25 @@ class TrackerApp:
 
     def _persist_game(self, view):
         try:
+            # Signature from facts stable across a re-parse of the same game
+            # (a tracker restart can re-read the ending with slightly
+            # different hp values, so those stay out of the signature).
             sig_src = json.dumps(
-                [sorted(view["names"].items()), view["hp_track"]], default=str
+                [
+                    sorted(view["names"].items()),
+                    [r for r, _hp in view["hp_track"]],
+                    "duos" if view["teams"] else "solo",
+                    view["friendly"],
+                ],
+                default=str,
             )
             sig = hashlib.md5(sig_src.encode()).hexdigest()[:12]
             if HISTORY_FILE.exists():
+                # Records are a few hundred KB each — scan a window that
+                # covers the last several games, not just the last one's tail.
                 with open(HISTORY_FILE, "rb") as fh:
                     fh.seek(0, 2)
-                    fh.seek(max(0, fh.tell() - 65536))
+                    fh.seek(max(0, fh.tell() - 8 * 1024 * 1024))
                     if sig.encode() in fh.read():
                         return
             place = view["statuses"].get(view["friendly"], {}).get("place", 0)
@@ -694,9 +754,13 @@ class TrackerApp:
         self.status_lbl = tk.Label(inner, text="starting…", bg=BG_BAR, fg=FAINT,
                                    font=(MONO, 9), anchor="w")
         self.status_lbl.pack(side="left", padx=(8, 0))
+        self._mode_btn = tk.Label(inner, text="full" if self.collapsed else "mini",
+                                  bg=BG_BAR, fg=BLUE, font=(UI, 9), cursor="hand2")
+        self._mode_btn.pack(side="right")
+        self._mode_btn.bind("<Button-1>", lambda _e: self._toggle_mini())
         stats_btn = tk.Label(inner, text="stats", bg=BG_BAR, fg=BLUE,
                              font=(UI, 9), cursor="hand2")
-        stats_btn.pack(side="right")
+        stats_btn.pack(side="right", padx=(0, 12))
         stats_btn.bind("<Button-1>", lambda _e: self._open_stats())
         self.topmost_var = tk.BooleanVar(value=True)
         tk.Checkbutton(
@@ -713,8 +777,10 @@ class TrackerApp:
         holder = tk.Canvas(self.root, bg=BG, highlightthickness=0)
         scroll = tk.Scrollbar(self.root, orient="vertical", command=holder.yview, width=8)
         holder.configure(yscrollcommand=scroll.set)
-        scroll.pack(side="right", fill="y")
-        holder.pack(fill="both", expand=True)
+        if not self.collapsed:
+            scroll.pack(side="right", fill="y")
+            holder.pack(fill="both", expand=True)
+        self._lobby_scroll = scroll
         self.lobby = tk.Frame(holder, bg=BG)
         win = holder.create_window((0, 0), window=self.lobby, anchor="nw")
         self.lobby.bind(
@@ -820,6 +886,8 @@ class TrackerApp:
 
         # Auto-select the upcoming opponent when it changes.
         nxt = view["next_opp"]
+        if nxt and self._prev_next_opp and nxt != self._prev_next_opp:
+            self._last_opp = self._prev_next_opp
         if (
             nxt
             and nxt != self._prev_next_opp
@@ -830,6 +898,7 @@ class TrackerApp:
         ):
             self.pinned_pid = None  # follow the next opponent by default
             self._detail_sel = None
+            self.mini_prev = False  # a new pairing outdates "prev"
         if nxt:
             self._prev_next_opp = nxt
 
@@ -875,6 +944,9 @@ class TrackerApp:
             return
         if view["choosing"] and view["choices"] and not view["game_over"]:
             self._sync_hero_choices(view)
+            return
+        if self.collapsed:
+            self._sync_hero_mini(view)
             return
         team = self._shown_team()
         if not team:
@@ -1104,6 +1176,128 @@ class TrackerApp:
         for wdg in (cell, c):
             self.tooltip.attach(wdg, m.card_id, extra)
 
+    # -------------------------------------------------------------- mini mode
+
+    def _mini_show(self, prev: bool):
+        self._last_click = time.time()
+        self.mini_prev = prev
+        self.pinned_pid = None
+        self._detail_sel = None
+        self.dirty.set()
+
+    def _sync_hero_mini(self, view):
+        """Collapsed layout: one thumbnail row per shown fighter, nothing else."""
+        if view["game_over"] and self.pinned_pid is None:
+            place = view["statuses"].get(view["friendly"], {}).get("place", 0)
+            if not place and view["teammate"]:
+                place = view["statuses"].get(view["teammate"], {}).get("place", 0)
+            key = ("mini-over", place)
+            if key != self._hero_key:
+                self._hero_key = key
+                self._wipe_hero()
+                tk.Label(self.hero,
+                         text=f"game over — you placed #{place}" if place else "game over",
+                         bg=BG, fg=FG, font=(UI, 10, "bold"), pady=18).pack()
+            return
+
+        heroes = view["heroes"]
+        mode, anchor = "next", view["next_opp"]
+        if self.pinned_pid is not None and self.pinned_pid in heroes:
+            mode, anchor = "view", self.pinned_pid
+        elif self.mini_prev and self._last_opp in heroes:
+            mode, anchor = "prev", self._last_opp
+        if not anchor or anchor not in heroes:
+            key = ("mini-none",)
+            if key != self._hero_key:
+                self._hero_key = key
+                self._wipe_hero()
+                tk.Label(self.hero, text="No opponent announced yet",
+                         bg=BG, fg=FG_DIM, font=(UI, 9), pady=18).pack()
+            return
+
+        teams = view["teams"]
+        if teams and anchor in teams:
+            team = [p for p in view["order"] if teams.get(p) == teams[anchor]]
+        else:
+            team = [anchor]
+        parts = []
+        for pid in team:
+            snap, minions, idx, _h = self._fighter_data(view, pid)
+            parts.append((pid, id(snap), idx, len(minions) if minions else 0))
+        can_prev = (mode == "next" and self._last_opp in heroes
+                    and self._last_opp != anchor)
+        key = ("mini", mode, tuple(parts), can_prev, view["turn"])
+        if key == self._hero_key:
+            return
+        self._hero_key = key
+        self.tooltip.hide()
+        self._wipe_hero()
+
+        is_next = mode == "next"
+        box = tk.Frame(self.hero, bg=BG_HERO if is_next else BG_ROW)
+        box.pack(fill="x")
+        tk.Frame(self.hero, bg="#3a2a20" if is_next else HAIR, height=1).pack(fill="x")
+        bgc = box["bg"]
+
+        head = tk.Frame(box, bg=bgc)
+        head.pack(fill="x", padx=10, pady=(6, 2))
+        label = {"next": "⚔ NEXT", "prev": "↩ PREV", "view": "VIEWING"}[mode]
+        tk.Label(head, text=label, bg=bgc, fg=ACCENT if is_next else FG_DIM,
+                 font=(UI, 9, "bold")).pack(side="left")
+        names = " & ".join(
+            (heroes[p].name or self.cards.name(heroes[p].card_id))
+            for p in team if p in heroes
+        )
+        tk.Label(head, text=" " + names, bg=bgc, fg=FG,
+                 font=(UI, 9, "bold")).pack(side="left")
+        if mode == "prev":
+            btn = tk.Label(head, text="next ▸", bg=bgc, fg=BLUE,
+                           font=(UI, 9), cursor="hand2")
+            btn.pack(side="right")
+            btn.bind("<Button-1>", lambda _e: self._mini_show(False))
+        elif can_prev:
+            btn = tk.Label(head, text="◂ prev", bg=bgc, fg=BLUE,
+                           font=(UI, 9), cursor="hand2")
+            btn.pack(side="right")
+            btn.bind("<Button-1>", lambda _e: self._mini_show(True))
+
+        for pid in team:
+            snap, minions, idx, _h = self._fighter_data(view, pid)
+            is_self = pid == view["friendly"]
+            meta = []
+            if len(team) > 1 and pid in heroes:
+                nm = heroes[pid].name or self.cards.name(heroes[pid].card_id)
+                meta.append(nm.split()[0] if nm else "?")
+            st = view["statuses"].get(pid, {})
+            ehp = st.get("hp", 0) + st.get("armor", 0)
+            if ehp > 0:
+                meta.append(f"{ehp}hp")
+            tier = view["own_tier"] if is_self else (snap.tech_level if snap else 0)
+            if tier:
+                meta.append(f"T{tier}")
+            if minions:
+                meta.append(f"~{self._threat(tier, minions)} dmg")
+            if snap:
+                age = view["turn"] - snap.round_num if view["turn"] else 0
+                meta.append(f"r{snap.round_num}" + (f" ({age} old)" if age >= 2 else ""))
+                meta.append({
+                    "win": f"won +{snap.result_dmg}",
+                    "loss": f"lost -{snap.result_dmg}",
+                    "tie": "tied",
+                }.get(snap.result, ""))
+            elif is_self:
+                meta.append("live")
+            tk.Label(box, text=" · ".join(m for m in meta if m), bg=bgc, fg=FG_DIM,
+                     font=(MONO, 8), anchor="w").pack(fill="x", padx=10)
+            if minions:
+                c = tk.Canvas(box, width=7 * (self.THUMB_W + 2) - 2,
+                              height=self.THUMB_H, bg=bgc, highlightthickness=0)
+                c.pack(anchor="w", padx=10, pady=(1, 6))
+                self._draw_thumbs(c, minions)
+            else:
+                tk.Label(box, text="no board seen yet", bg=bgc, fg=FAINT,
+                         font=(UI, 9), anchor="w").pack(fill="x", padx=10, pady=(2, 8))
+
     # -------------------------------------------------------- hero pick panel
 
     def _sync_hero_choices(self, view):
@@ -1209,6 +1403,8 @@ class TrackerApp:
     # ------------------------------------------------------------------ lobby
 
     def _sync_lobby(self, view):
+        if self.collapsed:
+            return  # lobby is hidden; expanding forces a rebuild
         if not view["in_bg"] or not view["heroes"]:
             if self._lobby_key != ("idle",):
                 self._lobby_key = ("idle",)

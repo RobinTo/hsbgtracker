@@ -663,8 +663,13 @@ class BgGame:
     # ------------------------------------------------------------------ query
 
     def lobby_heroes(self):
-        """All lobby hero entities (one per player), by lobby player id."""
-        out = {}
+        """All lobby hero entities (one per player), by lobby player id.
+
+        A real (non-copy) hero entity only exists for players we've fought;
+        the reveal during the hero pick creates COPIED_FROM_ENTITY_ID copies
+        for everyone else, so a copy serves as fallback until the real one
+        appears — that way the whole lobby is known from turn 0."""
+        best: dict[int, tuple] = {}
         for ent in self.entities.values():
             pid = ent.tag("PLAYER_ID")
             if (
@@ -672,12 +677,16 @@ class BgGame:
                 and ent.tag("CARDTYPE") == "HERO"
                 and ent.card_id
                 and ent.card_id not in INNKEEPER_CARDS
-                and not ent.tag("COPIED_FROM_ENTITY_ID")  # skip combat copies
             ):
-                # Prefer an entity we have a display name for.
-                if pid not in out or (ent.name and not out[pid].name):
-                    out[pid] = ent
-        return out
+                # Real entities beat copies; within a rank, prefer the first
+                # entity we have a display name for (the old behavior).
+                rank = (
+                    0 if ent.tag("COPIED_FROM_ENTITY_ID") else 1,
+                    1 if ent.name else 0,
+                )
+                if pid not in best or rank > best[pid][0]:
+                    best[pid] = (rank, ent)
+        return {pid: ent for pid, (_r, ent) in best.items()}
 
     def hero_choices(self):
         """Heroes offered at the start of the game:
