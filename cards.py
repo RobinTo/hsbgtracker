@@ -15,7 +15,7 @@ from pathlib import Path
 
 CACHE_FILE = Path(__file__).with_name("cards_cache.json")
 HSJSON_URL = "https://api.hearthstonejson.com/v1/latest/enUS/cards.json"
-CACHE_VERSION = 4
+CACHE_VERSION = 5
 
 TAG_RE = re.compile(r"</?[bi]>|\[x\]")
 
@@ -39,6 +39,7 @@ class CardDb:
         # id -> [name, races, text, techLevel, attack, health]
         self._cards: dict[str, list] = {}
         self._dbf: dict[str, str] = {}  # str(dbfId) -> card id
+        self._bg: dict = {}  # current BG pool: minions/spells/trinkets/heroes
         self._learned: dict[str, str] = {}
         self._lock = threading.Lock()
         self._load_cache()
@@ -54,6 +55,7 @@ class CardDb:
                 with self._lock:
                     self._cards = data["cards"]
                     self._dbf = data.get("dbf", {})
+                    self._bg = data.get("bg", {})
         except (OSError, json.JSONDecodeError, KeyError):
             pass
 
@@ -76,6 +78,8 @@ class CardDb:
                     cards = json.load(resp)
                 slim = {}
                 dbf = {}
+                bg = {"minions": [], "spells": [], "trinkets": [], "heroes": []}
+                by_dbf_full = {c["dbfId"]: c for c in cards if "dbfId" in c}
                 for c in cards:
                     if "name" not in c:
                         continue
@@ -87,12 +91,42 @@ class CardDb:
                     ]
                     if "dbfId" in c:
                         dbf[str(c["dbfId"])] = c["id"]
+                    # The current Battlegrounds pool, for the card browser.
+                    mech = (c.get("mechanics") or []) + (c.get("referencedTags") or [])
+                    duos = bool(c.get("isBattlegroundsDuosExclusive"))
+                    if c.get("isBattlegroundsPoolMinion"):
+                        bg["minions"].append({
+                            "id": c["id"], "n": c["name"], "t": c.get("techLevel", 0),
+                            "r": races, "x": text, "a": c.get("attack", 0),
+                            "h": c.get("health", 0), "m": mech, "d": duos,
+                        })
+                    elif c.get("isBattlegroundsPoolSpell"):
+                        bg["spells"].append({
+                            "id": c["id"], "n": c["name"], "t": c.get("techLevel", 0),
+                            "c": c.get("cost", 0), "x": text, "m": mech, "d": duos,
+                        })
+                    elif c.get("type") == "BATTLEGROUND_TRINKET":
+                        bg["trinkets"].append({
+                            "id": c["id"], "n": c["name"], "c": c.get("cost", 0),
+                            "r": c.get("battlegroundsAssociatedRaces") or [],
+                            "x": text, "m": mech, "d": duos,
+                        })
+                    elif c.get("battlegroundsHero"):
+                        power = by_dbf_full.get(c.get("heroPowerDbfId"), {})
+                        bg["heroes"].append({
+                            "id": c["id"], "n": c["name"],
+                            "ar": c.get("armor", 0),
+                            "pn": power.get("name", ""),
+                            "px": TAG_RE.sub("", power.get("text", ""))
+                                  .replace("\n", " ").strip(),
+                        })
                 with self._lock:
                     self._cards = slim
                     self._dbf = dbf
+                    self._bg = bg
                 CACHE_FILE.write_text(
                     json.dumps(
-                        {"v": CACHE_VERSION, "cards": slim, "dbf": dbf},
+                        {"v": CACHE_VERSION, "cards": slim, "dbf": dbf, "bg": bg},
                         ensure_ascii=False,
                     ),
                     encoding="utf-8",
@@ -166,6 +200,12 @@ class CardDb:
     def card_by_dbf(self, dbf_id: int) -> str:
         with self._lock:
             return self._dbf.get(str(dbf_id), "")
+
+    def bg_pool(self) -> dict:
+        """Current Battlegrounds pool (minions/spells/trinkets/heroes),
+        empty until the card DB has downloaded at least once."""
+        with self._lock:
+            return self._bg
 
     def tribe_label(self, minions) -> str:
         """Dominant tribe of a board, if one covers at least half of it."""

@@ -457,11 +457,16 @@ class TrackerApp:
             self.tailer = LogTailer(logs_dir, self.game, self.lock, self.dirty.set)
             self.tailer.start()
 
+        import cards_page
         import live_server
         import stats_page
+        from images import fetch_art
 
         self._server = live_server.start(
-            self._live_state, lambda: stats_page.build_html(self.cards)
+            self._live_state,
+            lambda: stats_page.build_html(self.cards),
+            lambda: cards_page.build_html(self.cards),
+            fetch_art,
         )
 
         self._poll()
@@ -673,6 +678,14 @@ class TrackerApp:
             pass  # never let stats bookkeeping break the tracker
 
     def _open_stats(self):
+        self._open_page("/", "stats_page")
+
+    def _open_cards(self):
+        self._open_page("/cards", "cards_page")
+
+    def _open_page(self, path: str, fallback_module: str):
+        """Open a tracker page via the local server, or build the static
+        file if the server port was taken by another instance."""
         def work():
             try:
                 if self._server is not None:
@@ -680,11 +693,12 @@ class TrackerApp:
 
                     from live_server import PORT
 
-                    webbrowser.open(f"http://127.0.0.1:{PORT}/")
+                    webbrowser.open(f"http://127.0.0.1:{PORT}{path}")
                 else:
-                    import stats_page
+                    import importlib
 
-                    stats_page.build(open_browser=True, cards=self.cards)
+                    mod = importlib.import_module(fallback_module)
+                    mod.build(open_browser=True, cards=self.cards)
             except Exception:
                 pass
 
@@ -762,6 +776,10 @@ class TrackerApp:
                              font=(UI, 9), cursor="hand2")
         stats_btn.pack(side="right", padx=(0, 12))
         stats_btn.bind("<Button-1>", lambda _e: self._open_stats())
+        cards_btn = tk.Label(inner, text="cards", bg=BG_BAR, fg=BLUE,
+                             font=(UI, 9), cursor="hand2")
+        cards_btn.pack(side="right", padx=(0, 12))
+        cards_btn.bind("<Button-1>", lambda _e: self._open_cards())
         self.topmost_var = tk.BooleanVar(value=True)
         tk.Checkbutton(
             inner, text="on top", variable=self.topmost_var,

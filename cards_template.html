@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BG Tracker — card pool</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --surface-2: #26272b;
+    --ink: #ffffff;
+    --ink-2: #c3c2b7;
+    --muted: #898781;
+    --baseline: #383835;
+    --border: rgba(255,255,255,0.10);
+    --accent: #d95926;
+    --gold: #ffd75e;
+    --tier: #cfe2f5;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--page); color: var(--ink);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding: 24px 16px 48px;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 600; }
+  .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+
+  .filters { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 0; }
+  .filters .flabel { color: var(--muted); font-size: 12px; align-self: center; width: 52px; }
+  .filters button {
+    background: var(--surface); color: var(--ink-2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px 11px; font: inherit; font-size: 12.5px; cursor: pointer;
+  }
+  .filters button:hover { background: var(--surface-2); }
+  .filters button.on { background: var(--surface-2); color: var(--ink); border-color: var(--baseline); font-weight: 600; }
+  .filters.tabs { margin-top: 16px; }
+  .filters.tabs button { font-size: 13.5px; padding: 6px 16px; }
+  .filters.tabs button.on { border-color: var(--accent); color: var(--ink); }
+
+  #search {
+    background: var(--surface); color: var(--ink); border: 1px solid var(--border);
+    border-radius: 6px; padding: 5px 10px; font: inherit; font-size: 13px;
+    width: 240px; margin-top: 12px;
+  }
+  #search:focus { outline: none; border-color: var(--baseline); }
+  .count { color: var(--muted); font-size: 12px; margin: 10px 0 12px; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(186px, 1fr)); gap: 10px; }
+  .cardbox { min-width: 0; display: flex; flex-direction: column; }
+  .cardbox img { width: 100%; height: auto; display: block; }
+  .fallback {
+    display: none; flex-direction: column; gap: 6px; flex: 1;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px; font-size: 12.5px;
+  }
+  .fallback.only { display: flex; }
+  .fallback .fname { font-weight: 600; font-size: 13.5px; }
+  .fallback .fstats { color: var(--gold); font-weight: 600; }
+  .fallback .ftext { color: var(--ink-2); }
+  .cap { color: var(--muted); font-size: 11.5px; padding: 3px 4px 10px; }
+  .cap b { color: var(--tier); font-weight: 600; }
+  .cap .duo { color: var(--accent); }
+  .cap .career { color: var(--ink-2); display: block; }
+  .power { color: var(--ink-2); font-size: 11.5px; padding: 0 4px 10px; margin-top: -6px; }
+  .power b { color: var(--ink); }
+  .empty { color: var(--muted); padding: 30px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>BG Tracker — card pool</h1>
+  <div class="sub" id="generated"></div>
+
+  <div class="filters tabs" id="tabs"></div>
+  <input id="search" type="search" placeholder="search name or text…">
+  <div class="filters" id="tierFilter"></div>
+  <div class="filters" id="tribeFilter"></div>
+  <div class="filters" id="effectFilter"></div>
+  <div class="count" id="count"></div>
+  <div class="grid" id="grid"></div>
+</div>
+
+<script>
+const DATA = /*__DATA__*/;
+// BG-styled renders cover the whole pool except heroes; heroes only have
+// regular renders. Each tile falls through the chain before going text-only.
+// Served by the tracker, images go through its local disk cache (/art/…);
+// the static-file build talks to the CDN directly.
+const LOCAL = location.protocol.startsWith("http");
+const CDN = {
+  render: id => `https://art.hearthstonejson.com/v1/render/latest/enUS/256x/${id}.png`,
+  bgs: id => `https://art.hearthstonejson.com/v1/bgs/latest/enUS/256x/${id}.png`,
+};
+const art = (kind, id) => LOCAL ? `/art/${kind}/${id}.png` : CDN[kind](id);
+const artChain = c => state.tab === "heroes"
+  ? [art("render", c.id)]
+  : [art("bgs", c.id), art("render", c.id)];
+const RACE_LABELS = {
+  BEAST: "Beast", DEMON: "Demon", DRAGON: "Dragon", ELEMENTAL: "Elemental",
+  MECHANICAL: "Mech", MURLOC: "Murloc", NAGA: "Naga", PIRATE: "Pirate",
+  QUILBOAR: "Quilboar", UNDEAD: "Undead", ALL: "Amalgam",
+};
+
+const TABS = [
+  ["minions", "Minions"], ["spells", "Spells"],
+  ["trinkets", "Trinkets"], ["heroes", "Heroes"],
+];
+
+// [label, predicate] — a chip is offered only if some card in the tab matches.
+const EFFECTS = [
+  ["Battlecry", c => (c.m || []).includes("BATTLECRY")],
+  ["Deathrattle", c => (c.m || []).includes("DEATHRATTLE") || /deathrattle/i.test(c.x || "")],
+  ["End of turn", c => /end of (your |each |the )?turn/i.test(c.x || "")],
+  ["Start of turn", c => /start of (your |each |the )?turn/i.test(c.x || "")],
+  ["Start of combat", c => (c.m || []).includes("START_OF_COMBAT") || /start of combat/i.test(c.x || "")],
+  ["Avenge", c => /avenge/i.test(c.x || "")],
+  ["When you buy", c => /(when|after) you buy/i.test(c.x || "")],
+  ["When you sell", c => /when (you sell|sold|this is sold)/i.test(c.x || "")],
+  ["Taunt", c => (c.m || []).includes("TAUNT")],
+  ["Divine Shield", c => (c.m || []).includes("DIVINE_SHIELD")],
+  ["Reborn", c => (c.m || []).includes("REBORN")],
+  ["Windfury", c => (c.m || []).includes("WINDFURY")],
+  ["Poison/Venom", c => (c.m || []).includes("POISONOUS") || (c.m || []).includes("VENOMOUS")],
+  ["Magnetic", c => (c.m || []).includes("MODULAR")],
+  ["Blood Gem", c => /blood gem/i.test(c.x || "")],
+  ["Duos only", c => c.d],
+];
+
+const state = { tab: "minions", tiers: new Set(), tribes: new Set(), effects: new Set(), q: "" };
+
+function chipRow(el, label, items, sel, onFlip) {
+  el.innerHTML = "";
+  if (!items.length) return;
+  const lab = document.createElement("span");
+  lab.className = "flabel";
+  lab.textContent = label;
+  el.appendChild(lab);
+  for (const [key, text] of items) {
+    const b = document.createElement("button");
+    b.textContent = text;
+    if (sel.has(key)) b.classList.add("on");
+    b.onclick = () => { sel.has(key) ? sel.delete(key) : sel.add(key); render(); };
+    el.appendChild(b);
+  }
+}
+
+function cardsOf(tab) { return DATA[tab] || []; }
+
+function tribeOf(c) { return c.r || []; }
+
+function matches(c) {
+  if (state.tiers.size && !state.tiers.has(c.t)) return false;
+  if (state.tribes.size) {
+    const r = tribeOf(c);
+    const hit = r.includes("ALL") || r.some(x => state.tribes.has(x)) ||
+                (state.tribes.has("NONE") && !r.length);
+    if (!hit) return false;
+  }
+  for (const key of state.effects) {
+    const eff = EFFECTS.find(e => e[0] === key);
+    if (eff && !eff[1](c)) return false;
+  }
+  if (state.q) {
+    const q = state.q.toLowerCase();
+    if (!(c.n || "").toLowerCase().includes(q) &&
+        !(c.x || "").toLowerCase().includes(q) &&
+        !(c.pn || "").toLowerCase().includes(q) &&
+        !(c.px || "").toLowerCase().includes(q)) return false;
+  }
+  return true;
+}
+
+function sortKey(c) {
+  if (state.tab === "trinkets") return [c.c || 0, c.n];
+  if (state.tab === "heroes") return [c.n];
+  return [c.t || 0, c.n];
+}
+
+function caption(c) {
+  const bits = [];
+  if (state.tab === "minions" || state.tab === "spells") bits.push(`<b>T${c.t || "?"}</b>`);
+  if (state.tab === "trinkets" || state.tab === "spells") bits.push(`${c.c || 0} gold`);
+  if (state.tab === "heroes" && c.ar) bits.push(`${c.ar} armor`);
+  const r = tribeOf(c).map(x => RACE_LABELS[x] || x).join("/");
+  if (r) bits.push(r);
+  if (c.d) bits.push('<span class="duo">Duos</span>');
+  let cap = bits.join(" · ");
+  const career = DATA.career[c.id];
+  if (state.tab === "heroes" && career && career.length) {
+    const avg = (career.reduce((a, b) => a + b, 0) / career.length).toFixed(1);
+    const firsts = career.filter(p => p === 1).length;
+    cap += `<span class="career">you: ${career.length} game(s) · avg #${avg}` +
+           (firsts ? ` · ${firsts}× first` : "") + `</span>`;
+  }
+  return cap;
+}
+
+function tile(c) {
+  const box = document.createElement("div");
+  box.className = "cardbox";
+  const img = document.createElement("img");
+  img.loading = "lazy";
+  img.alt = c.n;
+  const chain = artChain(c);
+  let step = 0;
+  img.src = chain[step];
+  const fb = document.createElement("div");
+  fb.className = "fallback";
+  const stats = state.tab === "minions" ? `<div class="fstats">${c.a}/${c.h}</div>` : "";
+  fb.innerHTML = `<div class="fname">${c.n}</div>${stats}` +
+                 `<div class="ftext">${c.x || ""}</div>`;
+  img.onerror = () => {
+    step += 1;
+    if (step < chain.length) img.src = chain[step];
+    else { img.remove(); fb.classList.add("only"); }
+  };
+  box.appendChild(img);
+  box.appendChild(fb);
+  const cap = document.createElement("div");
+  cap.className = "cap";
+  cap.innerHTML = `${c.n} — ${caption(c)}`;
+  box.appendChild(cap);
+  if (state.tab === "heroes" && (c.pn || c.px)) {
+    const p = document.createElement("div");
+    p.className = "power";
+    p.innerHTML = `<b>${c.pn}</b> ${c.px || ""}`;
+    box.appendChild(p);
+  }
+  return box;
+}
+
+function render() {
+  const tabs = document.getElementById("tabs");
+  tabs.innerHTML = "";
+  for (const [key, text] of TABS) {
+    const b = document.createElement("button");
+    b.textContent = `${text} (${cardsOf(key).length})`;
+    if (state.tab === key) b.classList.add("on");
+    b.onclick = () => {
+      state.tab = key;
+      state.tiers.clear(); state.tribes.clear(); state.effects.clear();
+      render();
+    };
+    tabs.appendChild(b);
+  }
+
+  const all = cardsOf(state.tab);
+  const tiers = [...new Set(all.map(c => c.t).filter(Boolean))].sort((a, b) => a - b);
+  chipRow(document.getElementById("tierFilter"), "tier",
+          tiers.map(t => [t, `T${t}`]), state.tiers);
+  const tribes = [...new Set(all.flatMap(tribeOf))].filter(x => x !== "ALL")
+    .sort((a, b) => (RACE_LABELS[a] || a).localeCompare(RACE_LABELS[b] || b))
+    .map(x => [x, RACE_LABELS[x] || x]);
+  if (tribes.length && all.some(c => !tribeOf(c).length)) tribes.push(["NONE", "No tribe"]);
+  chipRow(document.getElementById("tribeFilter"), "tribe", tribes, state.tribes);
+  const effects = EFFECTS.filter(e => all.some(e[1])).map(e => [e[0], e[0]]);
+  chipRow(document.getElementById("effectFilter"), "effect", effects, state.effects);
+
+  const shown = all.filter(matches).sort((a, b) => {
+    const ka = sortKey(a), kb = sortKey(b);
+    for (let i = 0; i < ka.length; i++) {
+      if (ka[i] < kb[i]) return -1;
+      if (ka[i] > kb[i]) return 1;
+    }
+    return 0;
+  });
+  document.getElementById("count").textContent =
+    `${shown.length} of ${all.length} shown · card art is fetched from hearthstonejson.com — ` +
+    `newly added cards may render as text`;
+  const grid = document.getElementById("grid");
+  grid.innerHTML = "";
+  if (!all.length) {
+    grid.innerHTML = '<div class="empty">Card pool not downloaded yet — ' +
+      'start the tracker once with internet access, then reload.</div>';
+    return;
+  }
+  for (const c of shown) grid.appendChild(tile(c));
+}
+
+document.getElementById("search").addEventListener("input", e => {
+  state.q = e.target.value.trim();
+  render();
+});
+document.getElementById("generated").textContent =
+  `pool as of ${DATA.generated} — refreshes automatically on game patches`;
+render();
+</script>
+</body>
+</html>

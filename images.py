@@ -13,6 +13,7 @@ file remembers cards the CDN doesn't have.
 from __future__ import annotations
 
 import queue
+import re
 import threading
 import urllib.request
 from pathlib import Path
@@ -23,6 +24,48 @@ CACHE_DIR = Path(__file__).with_name("images_cache")
 TILE_URL = "https://art.hearthstonejson.com/v1/tiles/{}.png"
 RENDER_URL = "https://art.hearthstonejson.com/v1/render/latest/enUS/256x/{}.png"
 ORIG_URL = "https://art.hearthstonejson.com/v1/orig/{}.png"  # 512x512 art
+BGS_URL = "https://art.hearthstonejson.com/v1/bgs/latest/enUS/256x/{}.png"
+
+# Card-browser art served through the local server: kind -> (subdir, url).
+# "render" shares the tooltip cache; "bgs" are the BG-styled renders.
+ART_PROXY = {
+    "render": ("renders", RENDER_URL),
+    "bgs": ("bgs", BGS_URL),
+}
+
+
+def fetch_art(kind: str, card_id: str) -> bytes | None:
+    """Synchronous cached fetch for the card-browser page. Downloads each
+    image from the CDN at most once (a .404 marker remembers misses, cleared
+    on game patches); afterwards it is served from images_cache."""
+    entry = ART_PROXY.get(kind)
+    aid = _art_id(card_id)
+    if entry is None or not re.fullmatch(r"[A-Za-z0-9_]{1,64}", aid):
+        return None
+    subdir, url_tpl = entry
+    d = CACHE_DIR / subdir
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"{aid}.png"
+    miss = d / f"{aid}.404"
+    try:
+        if path.exists():
+            return path.read_bytes()
+        if miss.exists():
+            return None
+        req = urllib.request.Request(
+            url_tpl.format(aid),
+            headers={"User-Agent": "hstracker/1.0 (+local BG tracker)"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = resp.read()
+        path.write_bytes(data)
+        return data
+    except Exception:
+        try:
+            miss.touch()
+        except OSError:
+            pass
+        return None
 
 # Tile display scale: 256x59 * 3/4 -> 192x44
 TILE_ZOOM, TILE_SUB = 3, 4
@@ -54,6 +97,7 @@ class ArtStore:
         (CACHE_DIR / "tiles").mkdir(parents=True, exist_ok=True)
         (CACHE_DIR / "renders").mkdir(parents=True, exist_ok=True)
         (CACHE_DIR / "orig").mkdir(parents=True, exist_ok=True)
+        (CACHE_DIR / "bgs").mkdir(parents=True, exist_ok=True)
         threading.Thread(target=self._worker, daemon=True).start()
 
     # ------------------------------------------------------------ tk thread
@@ -112,7 +156,7 @@ class ArtStore:
     def clear_misses(self):
         """Forget remembered 404s (a new patch usually means the CDN gained
         art for cards it lacked). Cached art itself stays valid."""
-        for kind in ("tiles", "renders", "orig"):
+        for kind in ("tiles", "renders", "orig", "bgs"):
             for f in (CACHE_DIR / kind).glob("*.404"):
                 try:
                     f.unlink()
