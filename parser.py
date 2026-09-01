@@ -162,6 +162,7 @@ class BgGame:
         self.anomaly_dbf = 0
         self._combat_snaps: list[Snapshot] = []  # taken during current combat
         self._combat_pre = None  # (our_hp, enemy_hp) at combat start
+        self._combat_face_dmg = 0  # face damage the enemy combat hero took
         self.is_battlegrounds = False
         self._pending_entity: Entity | None = None
         self.game_over = False
@@ -324,6 +325,7 @@ class BgGame:
     def _apply_tag(self, ent: Entity | None, tag: str, value: str):
         if ent is None:
             return
+        prev = ent.tags.get(tag) if tag == "DAMAGE" else None
         ent.tags[tag] = self._intval(value)
         # Hero choices sit in our HAND during the pick phase. Tag order in
         # the entity block varies, so trigger on either tag completing the
@@ -371,6 +373,7 @@ class BgGame:
                         self._pid_hp(self.friendly_controller),
                         self._pid_hp(pid),
                     )
+                    self._combat_face_dmg = 0
                     self._pending_swap = pid
                 else:
                     self._pending_combat_opponent = pid
@@ -386,6 +389,21 @@ class BgGame:
         elif tag == "BACON_DUO_TEAMMATE_PLAYER_ID":
             if ent.tag("PLAYER_ID") == self.friendly_controller and str(value).isdigit():
                 self.teammate_id = int(value)
+        elif tag == "DAMAGE" and self._in_combat and str(value).isdigit():
+            # A ghost's stand-in hero (Kel'Thuzad copy) enters combat already
+            # dead and the leaderboard never moves, so a win against it only
+            # shows as its DAMAGE ticking up mid-combat (reset again before
+            # MAIN_READY — track it live). Stand-ins are fresh entities, so
+            # their setup tags carry no prior value and are skipped here.
+            if (
+                isinstance(prev, int)
+                and int(value) > prev
+                and ent.tag("CARDTYPE") == "HERO"
+                and ent.tag("ZONE") == "PLAY"
+                and ent.tag("CONTROLLER") == self.enemy_controller
+                and ent.tag("PLAYER_ID") == self._last_combat_pid
+            ):
+                self._combat_face_dmg += int(value) - prev
         elif tag == "TURN" and value.isdigit():
             v = int(value)
             if not self._first_turn_seen:
@@ -456,6 +474,7 @@ class BgGame:
                 self._pid_hp(self.friendly_controller),
                 self._pid_hp(self._last_combat_pid),
             )
+            self._combat_face_dmg = 0
             if self._enemy_board():
                 self._take_snapshot(self._pending_combat_opponent)
             else:
@@ -543,6 +562,10 @@ class BgGame:
             result, dmg = "loss", own_delta
         elif enemy_delta > 0:
             result, dmg = "win", enemy_delta
+        elif enemy0 <= 0 and self._combat_face_dmg > 0:
+            # Ghost fight won: no leaderboard hp to take, but their stand-in
+            # hero absorbed damage past its zeroed health during combat.
+            result, dmg = "win", self._combat_face_dmg
         else:
             result, dmg = "tie", 0
         for snap in self._combat_snaps:
@@ -555,6 +578,7 @@ class BgGame:
             self.hp_track.append(hp_now)
         self._combat_pre = None
         self._combat_snaps = []
+        self._combat_face_dmg = 0
 
     def _pid_hp(self, pid: int) -> int:
         st = self.player_status().get(pid)

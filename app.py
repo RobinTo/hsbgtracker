@@ -47,10 +47,13 @@ BLUE = "#3987e5"      # our team
 GOLD = "#d8a441"      # golden minions
 ATK_C = "#e8c15a"
 HP_C = "#e0776a"
+ATK_BADGE = "#a8791f"  # attack circle fill, like the in-game gold coin
+HP_BADGE = "#ab362c"   # health circle fill, like the in-game blood drop
 GREEN = "#4fb477"
 TIER_BG = "#101c2c"
 TIER_FG = "#cfe2f5"
 BAND = "#0d0d0c"
+MAGIC = "#fe00fe"     # -transparentcolor key for the round mini icon
 
 UI = "Segoe UI"
 MONO = "Consolas"
@@ -65,6 +68,19 @@ KW_ABBR = {
     "Stealth": "ST",
     "Deathrattle": "DR",
 }
+
+# keyword -> (letter, badge fill) shown on board thumbnails, most
+# combat-defining first: badges wrap to a second row when one doesn't fit
+KW_BADGES = (
+    ("Poisonous", "P", "#3e8f4a"),
+    ("Venomous", "V", "#2e7d5b"),
+    ("Divine Shield", "D", "#b8952e"),
+    ("Taunt", "T", "#8a6d3b"),
+    ("Windfury", "W", "#3f7fae"),
+    ("Reborn", "R", "#7a5fa8"),
+    ("Deathrattle", "DR", "#4a4a48"),
+    ("Stealth", "S", "#5f6b72"),
+)
 
 TRIBE_FG = {
     "Pirate": "#d8a441",
@@ -86,6 +102,32 @@ VERSION_RE = __import__("re").compile(r"BattleNet version: Product = ([\d.]+)")
 def base_hero(card_id: str) -> str:
     """Skins are the same hero: BG20_HERO_202_SKIN_D -> BG20_HERO_202."""
     return SKIN_RE.sub("", card_id or "")
+
+
+def fmt_stat(n: int) -> str:
+    """1234 -> '1.2k' (one decimal, trailing zero dropped); small stays as-is."""
+    for div, suf in ((1_000_000, "m"), (1000, "k")):
+        if abs(n) >= div:
+            return f"{n / div:.1f}".rstrip("0").rstrip(".") + suf
+    return str(n)
+
+
+_BADGE_FONTS: dict = {}
+
+
+def draw_stat(c: tk.Canvas, x: int, y: int, text: str, color: str, anchor: str,
+              r: int, fs: int):
+    """In-game style stat circle, widened into a pill for abbreviated numbers.
+    anchor 'w' grows right from x, 'e' grows left."""
+    font = _BADGE_FONTS.get(fs)
+    if font is None:
+        import tkinter.font as tkfont
+
+        font = _BADGE_FONTS[fs] = tkfont.Font(family=UI, size=fs, weight="bold")
+    w = max(2 * r, font.measure(text) + 7)
+    x0 = x if anchor == "w" else x - w
+    c.create_oval(x0, y - r, x0 + w, y + r, fill=color, outline="#0b0b0a")
+    c.create_text(x0 + w // 2, y, text=text, fill="#ffffff", font=font)
 
 
 def read_game_patch(log_dir: Path | None) -> str:
@@ -179,6 +221,28 @@ def enable_dark_titlebar(root: tk.Tk):
         pass
 
 
+def strip_titlebar(root: tk.Tk) -> bool:
+    """Drop the native caption bar (Windows). Unlike overrideredirect this
+    keeps the taskbar entry, the thin resize border and minimize/restore;
+    the status bar doubles as the drag handle."""
+    try:
+        import ctypes
+
+        GWL_STYLE = -16
+        WS_CAPTION = 0x00C00000
+        root.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
+        style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_STYLE)
+        if not style:
+            return False
+        ctypes.windll.user32.SetWindowLongW(hwnd, GWL_STYLE, style & ~WS_CAPTION)
+        # SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_FRAMECHANGED
+        ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0027)
+        return True
+    except Exception:
+        return False
+
+
 def find_logs_dir() -> Path | None:
     candidates = []
     try:
@@ -222,6 +286,7 @@ class LogTailer(threading.Thread):
         self.on_change = on_change
         self.current: Path | None = None
         self._fh = None
+        self._rem = ""  # partial trailing line held until its newline lands
 
     def run(self):
         while True:
@@ -242,22 +307,28 @@ class LogTailer(threading.Thread):
             offset = self._last_game_offset(newest)
             self._prime_spectator(newest, offset)
             self._fh.seek(offset)
+            self._rem = ""
         if self._fh is None:
             return
         pos = self._fh.tell()
         size = self.current.stat().st_size
         if size < pos:
             self._fh.seek(0)
-        fed = False
+            self._rem = ""
+        # No tell()/seek() while consuming: text-mode tell() raises inside
+        # iteration, which used to kill the handle and force a full replay
+        # every time a poll caught the client mid-write.
+        chunk = self._fh.read()
+        if not chunk:
+            return
+        lines = (self._rem + chunk).split("\n")
+        self._rem = lines.pop()
+        if not lines:
+            return
         with self.lock:
-            for line in self._fh:
-                if not line.endswith("\n"):
-                    self._fh.seek(self._fh.tell() - len(line))
-                    break
-                self.game.feed_line(line.rstrip("\n"))
-                fed = True
-        if fed:
-            self.on_change()
+            for line in lines:
+                self.game.feed_line(line)
+        self.on_change()
 
     def _prime_spectator(self, path: Path, offset: int):
         """The spectator banner precedes CREATE_GAME, so seeking to the last
@@ -304,6 +375,7 @@ class LogTailer(threading.Thread):
                 pass
         self._fh = None
         self.current = None
+        self._rem = ""
 
 
 class Tooltip:
@@ -406,6 +478,15 @@ class TrackerApp:
         self.collapsed = bool(cfg.get("collapsed"))
         self.mini_prev = False  # mini mode: show previous opponent instead
         self._last_opp = 0  # pid of the opponent before the current pairing
+        # Mini-mode display state: "icon" (round hero face only), "hover"
+        # (expanded while the pointer is over it), "pinned" (stays expanded).
+        self.mini_state = "icon"
+        self._mini_anchor: tuple[int, int] | None = None  # icon top-left
+        self._mini_busy = False  # swallow synthetic Enter/Leave from resizes
+        self._mini_collapse_job = None
+        self._mini_expand_job = None
+        self._icon_press = None
+        self._chrome_icon = False  # window currently in icon chrome
 
         self._hero_key = None
         self._detail_sel: tuple[int, int] | None = None  # (pid, history index)
@@ -423,8 +504,12 @@ class TrackerApp:
         root.title("BG Tracker")
         root.configure(bg=BG)
         if self.collapsed:
-            root.geometry(cfg.get("geometry_mini") or self.MINI_GEOM)
-            root.minsize(*self.MINI_MINSIZE)
+            # Mini geometry is position-only; size is content-driven and set
+            # by the first refresh. Tolerates legacy "WxH+X+Y" values.
+            geom = cfg.get("geometry_mini") or ""
+            if "+" in geom:
+                root.geometry("+" + geom.split("+", 1)[1])
+            root.resizable(False, False)
         else:
             geom = cfg.get("geometry") or "760x860"
             # The board layout needs width; widen a remembered narrow window.
@@ -437,7 +522,10 @@ class TrackerApp:
             root.minsize(600, 480)
         root.attributes("-topmost", True)
         set_app_identity(root)
-        enable_dark_titlebar(root)
+        enable_dark_titlebar(root)  # for the frame Windows briefly shows
+        strip_titlebar(root)
+        # Tk rebuilds the frame style on deiconify — strip again on re-map.
+        root.bind("<Map>", lambda e: e.widget is root and strip_titlebar(root))
 
         self._build_shell()
         self._geom_save_job = None
@@ -448,6 +536,9 @@ class TrackerApp:
         root.bind("<Down>", lambda _e: self._nav_team(1))
         root.bind("<Left>", lambda _e: self._nav_round(-1))
         root.bind("<Right>", lambda _e: self._nav_round(1))
+        # Mini hover state: root-level crossings arm/cancel the collapse.
+        root.bind("<Enter>", self._on_root_enter, add="+")
+        root.bind("<Leave>", self._on_root_leave, add="+")
 
         logs_dir = find_logs_dir()
         if logs_dir is None:
@@ -482,14 +573,31 @@ class TrackerApp:
 
     # ------------------------------------------------------- window geometry
 
-    MINI_GEOM = "410x190"
-    MINI_MINSIZE = (310, 120)
+    MINI_MIN_W = 320  # width floor stops flapping between duo/solo/no-board
+    ICON_SIZE = 48
 
     def _save_geometry(self):
         self._geom_save_job = None
         cfg = load_config()
-        cfg["geometry_mini" if self.collapsed else "geometry"] = self.root.geometry()
+        geom = self.root.geometry()
+        if self.collapsed:
+            # position-only: mini size is content-driven, never restored
+            pos = geom.split("+", 1)
+            if len(pos) > 1:
+                cfg["geometry_mini"] = "+" + pos[1]
+        else:
+            cfg["geometry"] = geom
         save_config(cfg)
+
+    def _drag_start(self, event):
+        try:  # offset from the geometry string, exact for the frameless window
+            x, y = (int(v) for v in self.root.geometry().split("+")[1:3])
+        except (ValueError, IndexError):
+            x, y = self.root.winfo_x(), self.root.winfo_y()
+        self._drag = (event.x_root - x, event.y_root - y)
+
+    def _drag_move(self, event):
+        self.root.geometry(f"+{event.x_root - self._drag[0]}+{event.y_root - self._drag[1]}")
 
     def _on_configure(self, event):
         if event.widget is not self.root:
@@ -504,28 +612,179 @@ class TrackerApp:
 
     def _toggle_mini(self):
         cfg = load_config()
-        cfg["geometry_mini" if self.collapsed else "geometry"] = self.root.geometry()
+        if self.collapsed:
+            pos = self.root.geometry().split("+", 1)
+            if len(pos) > 1:
+                cfg["geometry_mini"] = "+" + pos[1]
+        else:
+            cfg["geometry"] = self.root.geometry()
         self.collapsed = not self.collapsed
         cfg["collapsed"] = self.collapsed
         save_config(cfg)
         if self.collapsed:
             self._lobby_scroll.pack_forget()
             self._lobby_canvas.pack_forget()
-            self.root.minsize(*self.MINI_MINSIZE)
-            # First collapse: default size, but stay where the window is.
-            pos = self.root.geometry().split("+", 1)
-            geom = cfg.get("geometry_mini") or (
-                self.MINI_GEOM + ("+" + pos[1] if len(pos) > 1 else ""))
+            self.root.resizable(False, False)
+            self.root.minsize(1, 1)
+            self.mini_state = "icon"
+            self._mini_anchor = None  # icon lands where the window is now
         else:
+            self._set_mini_chrome(False)
+            self.root.resizable(True, True)
             self._lobby_scroll.pack(side="right", fill="y")
             self._lobby_canvas.pack(fill="both", expand=True)
             self.root.minsize(600, 480)
-            geom = cfg.get("geometry") or "760x860"
-        self.root.geometry(geom)
+            self.root.geometry(cfg.get("geometry") or "760x860")
+        strip_titlebar(self.root)  # resizable() rebuilds the WM frame
         self._mode_btn.configure(text="full" if self.collapsed else "mini")
         self._hero_key = None
         self._lobby_key = None
-        self.dirty.set()
+        self.refresh()  # sync now so the mini autosize runs immediately
+
+    # -------------------------------------------------- mini icon / autosize
+
+    def _set_mini_chrome(self, icon: bool):
+        """Swap the window between icon chrome (no status bar, magic-color
+        transparency) and normal panel chrome. Idempotent."""
+        if self._chrome_icon == icon:
+            return
+        self._chrome_icon = icon
+        if icon:
+            self._status_frame.pack_forget()
+            self.root.configure(bg=MAGIC)
+            self.hero.configure(bg=MAGIC)
+            self.root.attributes("-transparentcolor", MAGIC)
+        else:
+            self.root.attributes("-transparentcolor", "")
+            self.root.configure(bg=BG)
+            self.hero.configure(bg=BG)
+            self._status_frame.pack(fill="x", side="bottom")
+
+    def _autosize_mini(self):
+        """Shrink-wrap the mini window around its content, keeping the
+        top-left corner put (clamped on-screen)."""
+        self._mini_busy = True
+        self.root.update_idletasks()
+        if self._chrome_icon:
+            w = h = self.ICON_SIZE
+            x, y = self._mini_anchor or (self.root.winfo_x(), self.root.winfo_y())
+        else:
+            # Status-bar width is ignored: its label clips, the hero content
+            # must not.
+            w = max(self.hero.winfo_reqwidth(), self.MINI_MIN_W)
+            h = self.hero.winfo_reqheight() + self._status_frame.winfo_reqheight()
+            try:
+                x, y = (int(v) for v in self.root.geometry().split("+")[1:3])
+            except (ValueError, IndexError):
+                x, y = self.root.winfo_x(), self.root.winfo_y()
+        x = max(0, min(x, self.root.winfo_screenwidth() - w))
+        y = max(0, min(y, self.root.winfo_screenheight() - h))
+        self.root.geometry(f"{w}x{h}+{x}+{y}")
+        self.root.after(150, self._mini_unbusy)
+
+    def _mini_unbusy(self):
+        self._mini_busy = False
+
+    def _mini_set_state(self, state: str):
+        """Switch mini display state and re-render/resize immediately —
+        the 400ms poll is too slow for hover feedback."""
+        self.mini_state = state
+        self._hero_key = None
+        if self._view is not None:
+            self._sync_hero(self._view)
+            self._autosize_mini()
+        else:
+            self.dirty.set()
+
+    def _mini_expand(self, state: str):
+        if not self.collapsed or self.mini_state != "icon":
+            return
+        if self._mini_expand_job is not None:
+            self.root.after_cancel(self._mini_expand_job)
+            self._mini_expand_job = None
+        try:
+            self._mini_anchor = tuple(
+                int(v) for v in self.root.geometry().split("+")[1:3])
+        except (ValueError, IndexError):
+            self._mini_anchor = (self.root.winfo_x(), self.root.winfo_y())
+        self._mini_set_state(state)
+
+    def _mini_collapse(self):
+        self._mini_collapse_job = None
+        if self.collapsed and self.mini_state == "hover":
+            self._mini_set_state("icon")
+
+    def _toggle_pin_open(self):
+        """Pin glyph in the expanded header: pinned -> icon, hover -> pinned."""
+        self._last_click = time.time()
+        self._mini_set_state("icon" if self.mini_state == "pinned" else "pinned")
+
+    def _on_root_enter(self, _event):
+        if self._mini_collapse_job is not None:
+            self.root.after_cancel(self._mini_collapse_job)
+            self._mini_collapse_job = None
+
+    def _on_root_leave(self, _event):
+        if not (self.collapsed and self.mini_state == "hover") or self._mini_busy:
+            return
+        if self._mini_collapse_job is not None:
+            self.root.after_cancel(self._mini_collapse_job)
+        self._mini_collapse_job = self.root.after(400, self._check_mini_leave)
+
+    def _check_mini_leave(self):
+        """Decide from the actual pointer position — root-level Enter/Leave
+        also fire when crossing between child widgets."""
+        self._mini_collapse_job = None
+        if not (self.collapsed and self.mini_state == "hover"):
+            return
+        w = self.root.winfo_containing(self.root.winfo_pointerx(),
+                                       self.root.winfo_pointery())
+        if w is None or w.winfo_toplevel() is not self.root:
+            self._mini_collapse()
+        else:  # still inside: keep watching until a real leave sticks
+            self._mini_collapse_job = self.root.after(400, self._check_mini_leave)
+
+    # Icon mouse handling: a press starts a potential drag; moving >4px drags
+    # the window, a clean release expands pinned.
+
+    def _icon_down(self, event):
+        if self._mini_expand_job is not None:
+            self.root.after_cancel(self._mini_expand_job)
+            self._mini_expand_job = None
+        self._drag_start(event)
+        self._icon_press = (event.x_root, event.y_root, False)
+
+    def _icon_move(self, event):
+        if self._icon_press is None:
+            return
+        px, py, moved = self._icon_press
+        if not moved and abs(event.x_root - px) + abs(event.y_root - py) <= 4:
+            return
+        self._icon_press = (px, py, True)
+        self._drag_move(event)
+        self._mini_anchor = (event.x_root - self._drag[0],
+                             event.y_root - self._drag[1])
+
+    def _icon_up(self, event):
+        press, self._icon_press = self._icon_press, None
+        if press and not press[2]:  # click, not drag
+            self._last_click = time.time()
+            self._mini_expand("pinned")
+
+    def _icon_hover(self, _event):
+        if self._mini_expand_job is not None:
+            self.root.after_cancel(self._mini_expand_job)
+        self._mini_expand_job = self.root.after(250, self._icon_hover_fire)
+
+    def _icon_hover_fire(self):
+        self._mini_expand_job = None
+        if self._icon_press is None:  # not mid-drag
+            self._mini_expand("hover")
+
+    def _icon_unhover(self, _event):
+        if self._mini_expand_job is not None:
+            self.root.after_cancel(self._mini_expand_job)
+            self._mini_expand_job = None
 
     # -------------------------------------------------------------- keyboard
 
@@ -759,18 +1018,25 @@ class TrackerApp:
         self.hero.pack(fill="x", side="top")
 
         status = tk.Frame(self.root, bg=BG_BAR)
+        self._status_frame = status  # hidden while the mini icon shows
         status.pack(fill="x", side="bottom")
         tk.Frame(status, bg=HAIR2, height=1).pack(fill="x", side="top")
         inner = tk.Frame(status, bg=BG_BAR)
         inner.pack(fill="x", padx=14, pady=6)
-        self.status_dot = tk.Frame(inner, bg=FAINT, width=7, height=7)
-        self.status_dot.pack(side="left")
-        self.status_lbl = tk.Label(inner, text="starting…", bg=BG_BAR, fg=FAINT,
-                                   font=(MONO, 9), anchor="w")
-        self.status_lbl.pack(side="left", padx=(8, 0))
+        # Buttons are created before the status label: pack hands out space
+        # in creation order, so when the auto-sized mini window is narrower
+        # than the full text the label clips instead of the buttons.
+        close_btn = tk.Label(inner, text="✕", bg=BG_BAR, fg=FG_DIM,
+                             font=(UI, 9), cursor="hand2")
+        close_btn.pack(side="right")
+        close_btn.bind("<Button-1>", lambda _e: self._on_close())
+        min_btn = tk.Label(inner, text="—", bg=BG_BAR, fg=FG_DIM,
+                           font=(UI, 9), cursor="hand2")
+        min_btn.pack(side="right", padx=(0, 10))
+        min_btn.bind("<Button-1>", lambda _e: self.root.iconify())
         self._mode_btn = tk.Label(inner, text="full" if self.collapsed else "mini",
                                   bg=BG_BAR, fg=BLUE, font=(UI, 9), cursor="hand2")
-        self._mode_btn.pack(side="right")
+        self._mode_btn.pack(side="right", padx=(0, 12))
         self._mode_btn.bind("<Button-1>", lambda _e: self._toggle_mini())
         stats_btn = tk.Label(inner, text="stats", bg=BG_BAR, fg=BLUE,
                              font=(UI, 9), cursor="hand2")
@@ -791,6 +1057,17 @@ class TrackerApp:
                              font=(UI, 9), cursor="hand2")
         recap_btn.pack(side="right", padx=(0, 12))
         recap_btn.bind("<Button-1>", lambda _e: self._clear_selection())
+        self.status_dot = tk.Frame(inner, bg=FAINT, width=7, height=7)
+        self.status_dot.pack(side="left")
+        self.status_lbl = tk.Label(inner, text="starting…", bg=BG_BAR, fg=FAINT,
+                                   font=(MONO, 9), anchor="w")
+        self.status_lbl.pack(side="left", padx=(8, 0), fill="x")
+        # No native titlebar: the status bar is the drag handle and hosts
+        # the window buttons.
+        for w in (status, inner, self.status_lbl, self.status_dot):
+            w.configure(cursor="fleur")
+            w.bind("<Button-1>", self._drag_start)
+            w.bind("<B1-Motion>", self._drag_move)
 
         holder = tk.Canvas(self.root, bg=BG, highlightthickness=0)
         scroll = tk.Scrollbar(self.root, orient="vertical", command=holder.yview, width=8)
@@ -809,6 +1086,8 @@ class TrackerApp:
         self.root.bind_all("<MouseWheel>", self._on_wheel)
 
     def _on_wheel(self, event):
+        if self.collapsed:  # lobby canvas is unpacked in mini mode
+            return
         c = self._lobby_canvas
         _, _, _, content_h = c.bbox("all") or (0, 0, 0, 0)
         if content_h > c.winfo_height():
@@ -920,7 +1199,10 @@ class TrackerApp:
         if nxt:
             self._prev_next_opp = nxt
 
+        prev_key = self._hero_key
         self._sync_hero(view)
+        if self.collapsed and self._hero_key != prev_key:
+            self._autosize_mini()
         self._sync_lobby(view)
         self._tick_status()
 
@@ -952,6 +1234,9 @@ class TrackerApp:
         return snap, (snap.minions if snap else []), idx, hist
 
     def _sync_hero(self, view):
+        if self.collapsed:  # mini handles idle/choosing/game-over itself
+            self._sync_hero_mini(view)
+            return
         if not view["in_bg"] or not view["heroes"]:
             key = ("idle",)
             if key != self._hero_key:
@@ -962,9 +1247,6 @@ class TrackerApp:
             return
         if view["choosing"] and view["choices"] and not view["game_over"]:
             self._sync_hero_choices(view)
-            return
-        if self.collapsed:
-            self._sync_hero_mini(view)
             return
         team = self._shown_team()
         if not team:
@@ -1177,11 +1459,8 @@ class TrackerApp:
             abbr = " · ".join(KW_ABBR.get(k, k[:2].upper()) for k in m.keywords)
             c.create_rectangle(0, h - 33, w, h - 20, fill="#0c0c0b", outline="")
             c.create_text(w // 2, h - 27, text=abbr, fill="#dfe6ef", font=(MONO, 7))
-        c.create_rectangle(0, h - 20, w, h, fill=BAND, outline="")
-        c.create_text(4, h - 10, text=str(m.attack), fill=ATK_C,
-                      font=(MONO, 11, "bold"), anchor="w")
-        c.create_text(w - 4, h - 10, text=str(m.health), fill=HP_C,
-                      font=(MONO, 11, "bold"), anchor="e")
+        draw_stat(c, 3, h - 11, fmt_stat(m.attack), ATK_BADGE, "w", 9, 9)
+        draw_stat(c, w - 3, h - 11, fmt_stat(m.health), HP_BADGE, "e", 9, 9)
 
         name = self.cards.name(m.card_id, m.name)
         cap = name if len(name) <= 13 else name[:12] + "…"
@@ -1203,19 +1482,107 @@ class TrackerApp:
         self._detail_sel = None
         self.dirty.set()
 
+    def _fight_results(self, view):
+        """Our resolved combats as (round, (result, dmg)), oldest first."""
+        by_round = {}
+        for hist in view["history"].values():
+            for s in hist:
+                if s.result:
+                    by_round[s.round_num] = (s.result, s.result_dmg)
+        return sorted(by_round.items())
+
+    def _mini_pin(self, parent, bgc):
+        """Pin glyph for the expanded mini panel: pinned -> back to icon,
+        hover -> pinned."""
+        pin = tk.Label(parent, text="📌", bg=bgc,
+                       fg=ACCENT if self.mini_state == "pinned" else FG_DIM,
+                       font=(UI, 9), cursor="hand2")
+        pin.bind("<Button-1>", lambda _e: self._toggle_pin_open())
+        return pin
+
+    def _render_mini_icon(self, view):
+        """Collapsed-to-a-dot state: one round hero face, everything else
+        (status bar included) hidden; window corners are transparent."""
+        heroes = view["heroes"]
+        game_over = view["in_bg"] and view["game_over"]
+        cid = None
+        for pid in (view["next_opp"], self.pinned_pid, view["friendly"]):
+            if pid and pid in heroes and heroes[pid].card_id:
+                cid = heroes[pid].card_id
+                break
+        place = 0
+        if game_over:
+            place = view["statuses"].get(view["friendly"], {}).get("place", 0)
+            if not place and view["teammate"]:
+                place = view["statuses"].get(view["teammate"], {}).get("place", 0)
+        img = self.art.get_icon(cid, MAGIC) if cid and not game_over else None
+        key = ("mini-icon", cid, place, img is not None)
+        if key == self._hero_key:
+            return
+        self._hero_key = key
+        self.tooltip.hide()
+        self._wipe_hero()
+        self._set_mini_chrome(True)
+        s = self.ICON_SIZE
+        c = tk.Canvas(self.hero, width=s, height=s, bg=MAGIC,
+                      highlightthickness=0, cursor="hand2")
+        c.pack()
+        is_next = bool(view["next_opp"]) and not game_over
+        if img is not None:
+            c.create_image(s // 2, s // 2, image=img)
+            c.image = img
+        else:
+            c.create_oval(2, 2, s - 2, s - 2, fill=BG_CHIP, outline="")
+            txt = f"#{place}" if place else ("?" if heroes and view["in_bg"] else "BG")
+            c.create_text(s // 2, s // 2, text=txt, fill=FG,
+                          font=(UI, 10, "bold"))
+        c.create_oval(2, 2, s - 2, s - 2,
+                      outline=ACCENT if is_next else EDGE, width=2)
+        c.bind("<Enter>", self._icon_hover)
+        c.bind("<Leave>", self._icon_unhover)
+        c.bind("<Button-1>", self._icon_down)
+        c.bind("<B1-Motion>", self._icon_move)
+        c.bind("<ButtonRelease-1>", self._icon_up)
+
     def _sync_hero_mini(self, view):
-        """Collapsed layout: one thumbnail row per shown fighter, nothing else."""
+        """Collapsed layout: a round hero icon by default; expanded (hover or
+        pinned) it shows one thumbnail row per shown fighter, nothing else."""
+        choosing = (view["in_bg"] and view["choosing"] and view["choices"]
+                    and not view["game_over"])
+        if self.mini_state == "icon" and not choosing:
+            self._render_mini_icon(view)
+            return
+        self._set_mini_chrome(False)
+        if choosing:  # hero pick is time-critical: always expanded
+            self._sync_hero_choices(view)
+            return
+        if not view["in_bg"] or not view["heroes"]:
+            key = ("mini-idle", self.mini_state)
+            if key != self._hero_key:
+                self._hero_key = key
+                self._wipe_hero()
+                box = tk.Frame(self.hero, bg=BG)
+                box.pack(fill="x")
+                self._mini_pin(box, BG).pack(side="right", padx=8, pady=8)
+                tk.Label(box, text="Waiting for a Battlegrounds game…",
+                         bg=BG, fg=FG_DIM, font=(UI, 9), pady=10,
+                         ).pack(side="left", padx=8)
+            return
         if view["game_over"] and self.pinned_pid is None:
             place = view["statuses"].get(view["friendly"], {}).get("place", 0)
             if not place and view["teammate"]:
                 place = view["statuses"].get(view["teammate"], {}).get("place", 0)
-            key = ("mini-over", place)
+            key = ("mini-over", place, self.mini_state)
             if key != self._hero_key:
                 self._hero_key = key
                 self._wipe_hero()
-                tk.Label(self.hero,
+                box = tk.Frame(self.hero, bg=BG)
+                box.pack(fill="x")
+                self._mini_pin(box, BG).pack(side="right", padx=8, pady=8)
+                tk.Label(box,
                          text=f"game over — you placed #{place}" if place else "game over",
-                         bg=BG, fg=FG, font=(UI, 10, "bold"), pady=18).pack()
+                         bg=BG, fg=FG, font=(UI, 10, "bold"), pady=12,
+                         ).pack(side="left", padx=8)
             return
 
         heroes = view["heroes"]
@@ -1225,12 +1592,16 @@ class TrackerApp:
         elif self.mini_prev and self._last_opp in heroes:
             mode, anchor = "prev", self._last_opp
         if not anchor or anchor not in heroes:
-            key = ("mini-none",)
+            key = ("mini-none", self.mini_state)
             if key != self._hero_key:
                 self._hero_key = key
                 self._wipe_hero()
-                tk.Label(self.hero, text="No opponent announced yet",
-                         bg=BG, fg=FG_DIM, font=(UI, 9), pady=18).pack()
+                box = tk.Frame(self.hero, bg=BG)
+                box.pack(fill="x")
+                self._mini_pin(box, BG).pack(side="right", padx=8, pady=8)
+                tk.Label(box, text="No opponent announced yet",
+                         bg=BG, fg=FG_DIM, font=(UI, 9), pady=10,
+                         ).pack(side="left", padx=8)
             return
 
         teams = view["teams"]
@@ -1244,7 +1615,9 @@ class TrackerApp:
             parts.append((pid, id(snap), idx, len(minions) if minions else 0))
         can_prev = (mode == "next" and self._last_opp in heroes
                     and self._last_opp != anchor)
-        key = ("mini", mode, tuple(parts), can_prev, view["turn"])
+        results = self._fight_results(view)
+        key = ("mini", self.mini_state, mode, tuple(parts), can_prev,
+               view["turn"], tuple(results))
         if key == self._hero_key:
             return
         self._hero_key = key
@@ -1258,7 +1631,7 @@ class TrackerApp:
         bgc = box["bg"]
 
         head = tk.Frame(box, bg=bgc)
-        head.pack(fill="x", padx=10, pady=(6, 2))
+        head.pack(fill="x", padx=8, pady=(4, 1))
         label = {"next": "⚔ NEXT", "prev": "↩ PREV", "view": "VIEWING"}[mode]
         tk.Label(head, text=label, bg=bgc, fg=ACCENT if is_next else FG_DIM,
                  font=(UI, 9, "bold")).pack(side="left")
@@ -1268,6 +1641,7 @@ class TrackerApp:
         )
         tk.Label(head, text=" " + names, bg=bgc, fg=FG,
                  font=(UI, 9, "bold")).pack(side="left")
+        self._mini_pin(head, bgc).pack(side="right", padx=(8, 0))
         if mode == "prev":
             btn = tk.Label(head, text="next ▸", bg=bgc, fg=BLUE,
                            font=(UI, 9), cursor="hand2")
@@ -1297,24 +1671,36 @@ class TrackerApp:
                 meta.append(f"~{self._threat(tier, minions)} dmg")
             if snap:
                 age = view["turn"] - snap.round_num if view["turn"] else 0
-                meta.append(f"r{snap.round_num}" + (f" ({age} old)" if age >= 2 else ""))
-                meta.append({
-                    "win": f"won +{snap.result_dmg}",
-                    "loss": f"lost -{snap.result_dmg}",
-                    "tie": "tied",
-                }.get(snap.result, ""))
+                # win/loss dropped: the fights strip's last entry shows it
+                meta.append(f"r{snap.round_num}" + (f"·{age}old" if age >= 2 else ""))
             elif is_self:
                 meta.append("live")
             tk.Label(box, text=" · ".join(m for m in meta if m), bg=bgc, fg=FG_DIM,
-                     font=(MONO, 8), anchor="w").pack(fill="x", padx=10)
+                     font=(MONO, 8), anchor="w").pack(fill="x", padx=8)
             if minions:
-                c = tk.Canvas(box, width=7 * (self.THUMB_W + 2) - 2,
-                              height=self.THUMB_H, bg=bgc, highlightthickness=0)
-                c.pack(anchor="w", padx=10, pady=(1, 6))
-                self._draw_thumbs(c, minions)
+                c = tk.Canvas(box, width=7 * (self.MINI_THUMB_W + 2) - 2,
+                              height=self.MINI_THUMB_H, bg=bgc, highlightthickness=0)
+                c.pack(anchor="w", padx=8, pady=(1, 4))
+                self._draw_thumbs(c, minions, small=True)
             else:
                 tk.Label(box, text="no board seen yet", bg=bgc, fg=FAINT,
-                         font=(UI, 9), anchor="w").pack(fill="x", padx=10, pady=(2, 8))
+                         font=(UI, 8), anchor="w").pack(fill="x", padx=8, pady=(1, 5))
+
+        if results:
+            row = tk.Frame(box, bg=bgc)
+            row.pack(fill="x", padx=8, pady=(0, 4))
+            tk.Label(row, text="⚔", bg=bgc, fg=FAINT,
+                     font=(MONO, 7)).pack(side="left")
+            shown = results[-8:]  # last N so the row fits the mini width
+            if len(results) > len(shown):
+                tk.Label(row, text=" …", bg=bgc, fg=FAINT,
+                         font=(MONO, 7)).pack(side="left")
+            for _rnd, (res, dmg) in shown:
+                txt, fg = {"win": (f"+{dmg}", GREEN),
+                           "loss": (f"-{dmg}", HP_C),
+                           "tie": ("=", FG_DIM)}[res]
+                tk.Label(row, text=txt, bg=bgc, fg=fg,
+                         font=(MONO, 7, "bold")).pack(side="left", padx=(3, 0))
 
     # -------------------------------------------------------- hero pick panel
 
@@ -1593,9 +1979,15 @@ class TrackerApp:
                 self._draw_thumbs(refs["thumbs"], minions)
 
     THUMB_W, THUMB_H = 48, 60
+    MINI_THUMB_W, MINI_THUMB_H = 40, 50
 
-    def _draw_thumbs(self, c: tk.Canvas, minions):
-        tw, th = self.THUMB_W, self.THUMB_H
+    def _draw_thumbs(self, c: tk.Canvas, minions, small=False):
+        if small:
+            tw, th = self.MINI_THUMB_W, self.MINI_THUMB_H
+            sr, kw_h, kw_step, kw_fs = 6, 4, 10, 5
+        else:
+            tw, th = self.THUMB_W, self.THUMB_H
+            sr, kw_h, kw_step, kw_fs = 7, 5, 11, 6
         step = tw + 2
         c.delete("all")
         c.images = []
@@ -1603,7 +1995,8 @@ class TrackerApp:
             x = i * step
             if minions and i < len(minions):
                 m = minions[i]
-                img = self.art.get_thumb(m.card_id)
+                img = (self.art.get_thumb_mini(m.card_id) if small
+                       else self.art.get_thumb(m.card_id))
                 if img is not None:
                     c.create_image(x + tw // 2, th // 2, image=img)
                     c.images.append(img)
@@ -1615,6 +2008,24 @@ class TrackerApp:
                     outline=GOLD if m.golden else EDGE,
                     width=2 if m.golden else 1,
                 )
+                draw_stat(c, x + 2, th - sr - 2, fmt_stat(m.attack),
+                          ATK_BADGE, "w", sr, sr)
+                draw_stat(c, x + tw - 2, th - sr - 2, fmt_stat(m.health),
+                          HP_BADGE, "e", sr, sr)
+                bx, by = x + 2, kw_h + 2
+                for kw, letter, color in KW_BADGES:
+                    if kw in m.keywords:
+                        if small:
+                            bw = 9 if len(letter) == 1 else 13
+                        else:
+                            bw = 10 if len(letter) == 1 else 15
+                        if bx + bw > x + tw - 1:  # row full: wrap
+                            bx, by = x + 2, by + kw_step
+                        c.create_oval(bx, by - kw_h, bx + bw, by + kw_h,
+                                      fill=color, outline="#0b0b0a")
+                        c.create_text(bx + bw // 2, by, text=letter,
+                                      fill="#ffffff", font=(UI, kw_fs, "bold"))
+                        bx += bw + 1
             else:
                 c.create_rectangle(x + 1, 1, x + tw - 1, th - 1, outline="#2f2f2b",
                                    dash=(2, 2))

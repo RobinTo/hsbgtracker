@@ -76,6 +76,28 @@ def _art_id(card_id: str) -> str:
     return card_id.removesuffix("_G")  # golden variants share base art
 
 
+def _mask_circle(img: tk.PhotoImage, magic: str) -> tk.PhotoImage:
+    """Copy with the pixels outside the inscribed circle painted `magic`,
+    so a -transparentcolor window shows the image as a round icon."""
+    w, h = img.width(), img.height()
+    out = tk.PhotoImage(width=w, height=h)
+    out.tk.call(str(out), "copy", str(img))
+    cx, cy = (w - 1) / 2, (h - 1) / 2
+    r = min(w, h) / 2
+    for y in range(h):
+        span = r * r - (y - cy) ** 2
+        if span <= 0:
+            out.put(magic, to=(0, y, w, y + 1))
+            continue
+        dx = span ** 0.5
+        x0, x1 = int(cx - dx), int(cx + dx) + 1
+        if x0 > 0:
+            out.put(magic, to=(0, y, x0, y + 1))
+        if x1 < w:
+            out.put(magic, to=(x1, y, w, y + 1))
+    return out
+
+
 def _crop_center(img: tk.PhotoImage, w: int, h: int) -> tk.PhotoImage:
     """Exact-size center crop (drops the white margins painted into art)."""
     iw, ih = img.width(), img.height()
@@ -123,10 +145,31 @@ class ArtStore:
         return self._get("orig", ORIG_URL, card_id, scale=(1, 7), variant="t",
                          crop=(48, 60))
 
+    def get_thumb_mini(self, card_id: str) -> tk.PhotoImage | None:
+        """Mini-mode board thumb: art scaled to ~56px, center-cropped to
+        40x50 — same crop idea as get_thumb, one size denser."""
+        return self._get("orig", ORIG_URL, card_id, scale=(1, 9), variant="tm",
+                         crop=(40, 50))
+
     def get_face(self, card_id: str) -> tk.PhotoImage | None:
         """Hero face for lobby rows: ~30px art cropped to 26x26."""
         return self._get("orig", ORIG_URL, card_id, scale=(1, 17), variant="f",
                          crop=(26, 26))
+
+    def get_icon(self, card_id: str, magic: str) -> tk.PhotoImage | None:
+        """Round hero face for the mini-mode icon: 44x44 crop whose corners
+        are painted `magic` so a -transparentcolor window clips them off."""
+        aid = _art_id(card_id)
+        key = ("icon", aid)
+        if key in self._photos:
+            return self._photos[key]
+        base = self._get("orig", ORIG_URL, card_id, scale=(1, 11), variant="F",
+                         crop=(44, 44))
+        if base is None:
+            return None
+        img = _mask_circle(base, magic)
+        self._photos[key] = img
+        return img
 
     def _get(self, kind, url_tpl, card_id, scale, variant="", crop=None):
         aid = _art_id(card_id)

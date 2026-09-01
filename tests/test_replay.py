@@ -53,9 +53,9 @@ def test_duos_game1():
         [2, 5, 8, 11],
     )
     check(
-        "duos: thorim results",
+        "duos: thorim results",  # r12 is a ghost fight, won via face damage
         [s.result for s in g.history.get(1, [])],
-        ["loss", "win", "win", "tie"],
+        ["loss", "win", "win", "win"],
     )
     check(
         "duos: eudora results",

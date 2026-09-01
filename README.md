@@ -67,6 +67,16 @@ resolve — i.e. the board exactly as the opponent built it.
 - `python stats.py` reports average placement, placement by final-board
   tribe, and the minions most common in your winning vs losing fights
 
+## Mini mode
+
+`mini` on the status bar collapses the tracker to a small round icon of the
+next opponent's hero (orange ring = opponent announced). Hover it to peek at
+their last-seen board — the panel shrink-wraps to its content (one row solo,
+two rows duos) and folds back to the icon when the mouse leaves. Click the
+icon (or the 📌 in the panel) to pin it open; drag the icon to move it. The
+hero-pick overview always shows expanded. `full` on the status bar returns
+to the full window.
+
 ## Keyboard
 
 Up/Down cycle players · Left/Right cycle a player's recorded rounds ·

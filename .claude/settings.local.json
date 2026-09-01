@@ -4,7 +4,9 @@
       "PowerShell(Select-String *)",
       "PowerShell($f = \"R:\\\\Games\\\\Hearthstone\\\\Logs\\\\Hearthstone_2026_08_11_08_30_21\\\\Power.log\"; \"{0:N1} MB\" -f \\(\\(Get-Item $f\\).Length/1MB\\); python R:\\\\code\\\\hstracker\\\\parser.py $f 2>&1 | Select-String \"snapshot: turn|player names|CREATE_GAME|Battlegrounds\" | Select-Object -First 30)",
       "WebFetch(domain:github.com)",
-      "Bash(gh api *)"
+      "Bash(gh api *)",
+      "Bash(python -m py_compile \"R:\\\\code\\\\hstracker\\\\app.py\")",
+      "Read(//r/Games/Hearthstone/Logs/**)"
     ]
   }
 }
