@@ -67,6 +67,12 @@
   .chip.gold { border-color: var(--gold); color: var(--gold); }
   .chip .st { color: var(--muted); }
   .fightseq { color: var(--ink-2); font-size: 12px; margin-top: 6px; }
+  /* Badges: career verdicts. Same tones in SVG (see badgeTone). */
+  .badge { display: inline-block; border-radius: 4px; padding: 1px 6px; margin: 0 3px 2px 0;
+           font-size: 11px; font-weight: 600; cursor: default; }
+  .badge.good { background: #143a25; color: #6fd39a; }
+  .badge.bad { background: #3f1f12; color: #f09a6e; }
+  .badge.neutral { background: var(--surface-2); color: var(--ink-2); }
   .win  { color: #0ca30c; }
   .loss { color: #ec835a; }
 
@@ -91,11 +97,11 @@
 
   <div class="cards">
     <div class="card wide">
-      <h2>Placement over time <span style="color:var(--muted);font-weight:400">(1 = win, lower is better)</span></h2>
+      <h2>Placement over time <span id="timelineHint" style="color:var(--muted);font-weight:400"></span></h2>
       <div id="timeline"></div>
     </div>
     <div class="card">
-      <h2>Average placement by final tribe</h2>
+      <h2><span class="metricName"></span> by final tribe</h2>
       <div id="tribes"></div>
     </div>
     <div class="card">
@@ -103,8 +109,13 @@
       <div id="roundrec"></div>
     </div>
     <div class="card wide">
-      <h2>Average placement by hero</h2>
+      <h2><span class="metricName"></span> by hero</h2>
       <div id="heroes"></div>
+    </div>
+    <div class="card wide">
+      <h2>Hero offers: taken vs passed
+        <span style="color:var(--muted);font-weight:400">(heroes offered at least 3 times)</span></h2>
+      <div id="heroPicks"></div>
     </div>
     <div class="card">
       <h2>Minions in winning final boards <span style="color:var(--muted);font-weight:400">(#1 finishes)</span></h2>
@@ -115,8 +126,16 @@
       <div id="lossMinions"></div>
     </div>
     <div class="card">
-      <h2>Rolls per game vs placement <span style="color:var(--muted);font-weight:400">(tracked from v2.3)</span></h2>
-      <div id="rolls"></div>
+      <h2>Economy: top half vs bottom half <span style="color:var(--muted);font-weight:400">(per game averages)</span></h2>
+      <div id="econ"></div>
+    </div>
+    <div class="card">
+      <h2>Average health by round <span style="color:var(--muted);font-weight:400">(health + armor, games still alive)</span></h2>
+      <div id="hpcurve"></div>
+    </div>
+    <div class="card wide">
+      <h2><span class="metricName"></span> by trinket <span style="color:var(--muted);font-weight:400">(both trinkets count)</span></h2>
+      <div id="trinkets"></div>
     </div>
     <div class="card">
       <h2>Tier-up pace <span style="color:var(--muted);font-weight:400">(average round reached)</span></h2>
@@ -144,7 +163,31 @@ const S2 = getComputedStyle(document.documentElement).getPropertyValue("--series
 const NS = "http://www.w3.org/2000/svg";
 
 document.getElementById("generated").textContent =
-  `${DATA.games.length} recorded game(s) · generated ${DATA.generated} · rerun "python stats_page.py" (or the tracker's 📈 button) to refresh`;
+  `${DATA.games.length} recorded game(s) · generated ${DATA.generated} · rerun "python stats_page.py" (or the tracker's 📈 button) to refresh`
+  + ` · badges are career-wide and ignore the filters`;
+const BADGES = DATA.badges || { heroes: {}, tribes: {}, trinkets: {} };
+const badgeTone = { good: ["#143a25", "#6fd39a"], bad: ["#3f1f12", "#f09a6e"], neutral: ["#26272b", "#c3c2b7"] };
+
+// HTML badge chips (tables); hover shows the numbers behind the verdict.
+function badgeChips(parent, badges) {
+  for (const b of badges || []) {
+    const chip = html(parent, "span", "badge " + b.tone, b.label);
+    hoverable(chip, () => [b.label, b.detail]);
+  }
+}
+// SVG badge chips laid out left to right from (x, y); returns the end x.
+function drawBadges(svg, x, y, h, badges) {
+  for (const b of badges || []) {
+    const w = b.label.length * 5.8 + 12;
+    const [bg, fg] = badgeTone[b.tone] || badgeTone.neutral;
+    const rect = el(svg, "rect", { x, y, width: w, height: h, rx: 4, fill: bg });
+    el(svg, "text", { x: x + w / 2, y: y + h - 4.5, "text-anchor": "middle", fill: fg,
+                      "font-size": 10, "font-weight": 600, "pointer-events": "none" }).textContent = b.label;
+    hoverable(rect, () => [b.label, b.detail]);
+    x += w + 4;
+  }
+  return x;
+}
 
 // ------------------------------------------------------------------ helpers
 function el(parent, tag, attrs) {
@@ -216,6 +259,33 @@ function games() {
     (mode === "all" || g.mode === mode) && (patch === "all" || g.patch === patch));
 }
 
+// ------------------------------------------------------------------- metric
+// Placements only compare within a mode (4th is last in duos, mid-pack in
+// solo). With one mode selected we show raw placement on a 1..N axis; with
+// "All" selected every game is scored as the share of the lobby it beat,
+// which puts a duos 4th (0%) and a solo 4th (57%) on the same scale.
+const seats = g => g.mode === "duos" ? 4 : 8;
+const share = g => 100 * (seats(g) - g.place) / (seats(g) - 1);
+const topHalf = g => g.place <= seats(g) / 2;
+function metric() {
+  if (mode === "all")
+    return { kind: "share", name: "Lobby beaten", value: share, domain: 100, lowIsGood: false,
+             fmt: v => v.toFixed(0) + "%", tip: v => `beat ${v.toFixed(0)}% of the lobby` };
+  const n = mode === "duos" ? 4 : 8;
+  return { kind: "place", name: "Average placement", value: g => g.place, domain: n, lowIsGood: true,
+           fmt: v => v.toFixed(2), tip: v => `avg #${v.toFixed(2)}` };
+}
+const mean = xs => xs.reduce((a, b) => a + b, 0) / xs.length;
+
+// Placement axis for a scatter/timeline: y(value) plus the gridline values.
+function placeAxis(m, top, bottom) {
+  const h = bottom - top;
+  if (m.kind === "share")
+    return { y: v => top + (1 - v / 100) * h, ticks: [0, 25, 50, 75, 100], label: v => v + "%" };
+  const ticks = m.domain === 4 ? [1, 2, 3, 4] : [1, 2, 4, 6, 8];
+  return { y: p => top + (p - 1) / (m.domain - 1) * h, ticks, label: p => "#" + p };
+}
+
 // -------------------------------------------------------------------- tiles
 function renderTiles(gs) {
   const box = document.getElementById("tiles");
@@ -228,18 +298,45 @@ function renderTiles(gs) {
     if (f.res === "win") w++; else if (f.res === "loss") l++;
   }
   const unplaced = gs.length - placed.length;
+  const tops = placed.filter(topHalf).length;
+  const pct = n => placed.length ? `${Math.round(100 * n / placed.length)}%` : "—";
+  let avgTile;
+  if (mode === "all") {
+    // One average across modes is meaningless; show each mode's own.
+    const per = ["solo", "duos"].map(m => {
+      const ps = placed.filter(g => g.mode === m).map(g => g.place);
+      return ps.length ? `${m} ${mean(ps).toFixed(2)}` : null;
+    }).filter(Boolean);
+    avgTile = ["Average placement", per.join(" · ") || "—", "per mode · not comparable across modes"];
+  } else {
+    avgTile = ["Average placement", placed.length ? avg.toFixed(2) : "—", `over ${placed.length} placed game(s)`];
+  }
   const tiles = [
     ["Games", String(gs.length),
      (mode === "all" ? "all modes" : mode) + (unplaced ? ` · ${unplaced} unplaced` : "")],
-    ["Average placement", placed.length ? avg.toFixed(2) : "—", `over ${placed.length} placed game(s)`],
-    ["First places", String(firsts),
-     placed.length ? `${Math.round(100 * firsts / placed.length)}% of ${placed.length} placed` : ""],
+    avgTile,
+    ["Top half", pct(tops), `${tops} of ${placed.length} · ` + (mode === "duos" ? "1st–2nd" : mode === "solo" ? "1st–4th" : "1st–4th solo, 1st–2nd duos")],
+    ["First places", pct(firsts), `${firsts} of ${placed.length} placed`],
     ["Fight winrate", (w + l) ? `${Math.round(100 * w / (w + l))}%` : "—", `${w}W ${l}L`],
   ];
+  // Today and streaks: games are stored in play order.
+  const m = metric();
+  const now = new Date(), pad = n => String(n).padStart(2, "0");
+  const todayKey = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  const todays = placed.filter(g => (g.ts || "").startsWith(todayKey));
+  tiles.push(["Today", String(todays.length), todays.length
+    ? `${m.kind === "share" ? "lobby beaten " : "avg #"}${m.fmt(mean(todays.map(m.value)))} · ${todays.filter(g => g.place === 1).length} first(s)`
+    : "no games yet today"]);
+  let streak = 0;
+  for (let i = placed.length - 1; i >= 0 && topHalf(placed[i]); i--) streak++;
+  let best = 0, run = 0;
+  for (const g of placed) { run = topHalf(g) ? run + 1 : 0; best = Math.max(best, run); }
+  tiles.push(["Top-half streak", String(streak), `in a row · best ${best}`]);
   for (const [label, value, note] of tiles) {
     const t = html(box, "div", "tile");
     html(t, "div", "label", label);
-    html(t, "div", "value", value);
+    const v = html(t, "div", "value", value);
+    if (value.length > 8) v.style.fontSize = "20px";  // "solo 3.93 · duos 2.41"
     if (note) html(t, "div", "note", note);
   }
 }
@@ -250,25 +347,46 @@ function renderTimeline(gs) {
   box.replaceChildren();
   const placed = gs.filter(g => g.place > 0);
   if (!placed.length) { html(box, "div", "empty", "No placed games yet."); return; }
-  const W = 940, H = 190, L = 34, R = 14, T = 12, B = 26;
+  const m = metric();
+  const WINDOW = 20;  // games in the rolling-form window
+  document.getElementById("timelineHint").textContent = m.kind === "share"
+    ? `(share of lobby beaten, higher is better · line = ${WINDOW}-game average)`
+    : `(1 = win, lower is better · line = ${WINDOW}-game average)`;
+  const W = 940, H = 190, L = 40, R = 14, T = 12, B = 26;
   const svg = el(null, "svg", { viewBox: `0 0 ${W} ${H}` });
-  const maxPlace = 8;
-  const y = p => T + (p - 1) / (maxPlace - 1) * (H - T - B);
+  const axis = placeAxis(m, T, H - B);
+  const y = g => axis.y(m.value(g));
   const x = i => placed.length === 1 ? W / 2 : L + i * (W - L - R) / (placed.length - 1);
-  for (const p of [1, 2, 4, 6, 8]) {
-    el(svg, "line", { x1: L, x2: W - R, y1: y(p), y2: y(p), stroke: "var(--grid)", "stroke-width": 1 });
-    el(svg, "text", { x: L - 8, y: y(p) + 4, "text-anchor": "end", fill: "var(--muted)", "font-size": 11 }).textContent = "#" + p;
+  for (const t of axis.ticks) {
+    el(svg, "line", { x1: L, x2: W - R, y1: axis.y(t), y2: axis.y(t), stroke: "var(--grid)", "stroke-width": 1 });
+    el(svg, "text", { x: L - 8, y: axis.y(t) + 4, "text-anchor": "end", fill: "var(--muted)", "font-size": 11 }).textContent = axis.label(t);
   }
-  if (placed.length > 1) {
-    const pts = placed.map((g, i) => `${x(i)},${y(g.place)}`).join(" ");
-    el(svg, "polyline", { points: pts, fill: "none", stroke: S1, "stroke-width": 2,
+  // Individual games as faint dots; the rolling average carries the signal.
+  const dotColor = g => m.kind === "share" && g.mode === "duos" ? S2 : S1;
+  placed.forEach((g, i) => {
+    el(svg, "circle", { cx: x(i), cy: y(g), r: 3, fill: dotColor(g), "fill-opacity": placed.length > 60 ? 0.45 : 0.8 });
+  });
+  if (placed.length > 2) {
+    const pts = placed.map((g, i) => {
+      const win = placed.slice(Math.max(0, i - WINDOW + 1), i + 1);
+      return `${x(i)},${axis.y(mean(win.map(m.value)))}`;
+    });
+    el(svg, "polyline", { points: pts.join(" "), fill: "none", stroke: "var(--ink)", "stroke-width": 2,
                           "stroke-linejoin": "round", "stroke-linecap": "round" });
   }
   placed.forEach((g, i) => {
-    el(svg, "circle", { cx: x(i), cy: y(g.place), r: 5, fill: S1, stroke: "var(--surface)", "stroke-width": 2 });
-    const hit = el(svg, "circle", { cx: x(i), cy: y(g.place), r: 14, fill: "transparent" });
-    hoverable(hit, () => [`#${g.place}`, `${g.hero} · ${g.mode} · ${g.ts}`]);
+    const hit = el(svg, "circle", { cx: x(i), cy: y(g), r: 12, fill: "transparent" });
+    hoverable(hit, () => [`#${g.place}` + (m.kind === "share" ? ` · ${m.tip(share(g))}` : ""),
+                          `${g.hero} · ${g.mode} · ${g.ts}`]);
   });
+  if (m.kind === "share") {
+    // Legend: dot colour distinguishes the modes when they share one axis.
+    [[S1, "solo"], [S2, "duos"]].forEach(([c, label], i) => {
+      const lx = W - R - 90 + i * 48;
+      el(svg, "circle", { cx: lx, cy: 5, r: 3.5, fill: c });
+      el(svg, "text", { x: lx + 7, y: 9, fill: "var(--muted)", "font-size": 11 }).textContent = label;
+    });
+  }
   const first = placed[0], last = placed[placed.length - 1];
   el(svg, "text", { x: L, y: H - 8, fill: "var(--muted)", "font-size": 11 }).textContent = (first.ts || "").slice(0, 10);
   if (placed.length > 1)
@@ -283,7 +401,9 @@ function renderBars(boxId, rows, color, tipFn, valueFmt, domainMax) {
   const box = document.getElementById(boxId);
   box.replaceChildren();
   if (!rows.length) { html(box, "div", "empty", "No data for this filter."); return; }
-  const W = 440, rowH = 26, barH = 16, labelW = 150, valueW = 64;
+  // Full-width cards get a wider viewBox so text keeps its size when scaled.
+  const wide = box.closest(".card").classList.contains("wide");
+  const W = wide ? 940 : 440, rowH = 26, barH = 16, labelW = wide ? 190 : 150, valueW = 64;
   const H = rows.length * rowH + 4;
   const svg = el(null, "svg", { viewBox: `0 0 ${W} ${H}` });
   const trackW = W - labelW - valueW;
@@ -293,9 +413,11 @@ function renderBars(boxId, rows, color, tipFn, valueFmt, domainMax) {
     const yTop = i * rowH + (rowH - barH) / 2;
     const lab = el(svg, "text", { x: labelW - 8, y: yTop + barH - 4, "text-anchor": "end",
                                   fill: "var(--ink-2)", "font-size": 12 });
-    lab.textContent = r.label.length > 20 ? r.label.slice(0, 19) + "…" : r.label;
+    const maxChars = wide ? 26 : 20;
+    lab.textContent = r.label.length > maxChars ? r.label.slice(0, maxChars - 1) + "…" : r.label;
     const w = Math.max(2, r.value / max * trackW);
     const bar = el(svg, "path", { d: barPath(labelW, yTop, w, barH), fill: color });
+    if (r.thin) { bar.setAttribute("fill-opacity", 0.4); lab.setAttribute("fill", "var(--muted)"); }
     const val = el(svg, "text", { x: labelW + w + 6, y: yTop + barH - 4, fill: "var(--ink)",
                                   "font-size": 12, "font-weight": 600 });
     val.textContent = valueFmt(r.value);
@@ -309,40 +431,102 @@ function renderBars(boxId, rows, color, tipFn, valueFmt, domainMax) {
     hit.addEventListener("pointerenter", () => bar.style.filter = "brightness(1.2)");
     hit.addEventListener("pointerleave", () => { bar.style.filter = ""; hideTip(); });
     hoverable(hit, () => tipFn(r));
+    if (r.badges && r.badges.length) {
+      // Chips go after the value/note text and above the hit rect so they get their own hover.
+      const textEnd = labelW + w + 6 + String(valueFmt(r.value)).length * 7 + 6
+        + (r.note ? r.note.length * 6 + 6 : 0);
+      drawBadges(svg, textEnd, yTop, barH, r.badges);
+    }
   });
   box.appendChild(svg);
 }
 
-function renderTribes(gs) {
-  const byTribe = new Map();
+// Bars of the current placement metric, grouped by keyFn(game), which returns
+// null, one [key, label] pair, or an array of pairs (a game in several groups).
+function renderMetricBars(boxId, gs, keyFn, limit, badgeMap) {
+  const m = metric();
+  const groups = new Map();
   for (const g of gs) {
-    if (!g.place || !g.tribe) continue;
-    if (!byTribe.has(g.tribe)) byTribe.set(g.tribe, []);
-    byTribe.get(g.tribe).push(g.place);
+    if (!g.place) continue;
+    let kls = keyFn(g);
+    if (!kls || !kls.length) continue;
+    if (!Array.isArray(kls[0])) kls = [kls];
+    for (const [key, label] of kls) {
+      if (!groups.has(key)) groups.set(key, { key, label, vals: [] });
+      groups.get(key).vals.push(m.value(g));
+    }
   }
-  const rows = [...byTribe.entries()]
-    .map(([t, ps]) => ({ label: t, value: ps.reduce((a, b) => a + b, 0) / ps.length, note: `(${ps.length})` }))
-    .sort((a, b) => a.value - b.value);
-  renderBars("tribes", rows, S1,
-    r => [`avg #${r.value.toFixed(2)}`, `${r.label} · ${r.note.replace(/[()]/g, "")} game(s)`],
-    v => v.toFixed(2), 8);
+  // Rows resting on fewer than MIN_N games sort below the rest and render faded.
+  const MIN_N = 3;
+  let rows = [...groups.values()]
+    .map(h => ({ label: h.label, value: mean(h.vals), note: `(${h.vals.length})`, thin: h.vals.length < MIN_N,
+                 badges: badgeMap ? badgeMap[h.key] : null }))
+    .sort((a, b) => (a.thin - b.thin) || (m.lowIsGood ? a.value - b.value : b.value - a.value));
+  if (limit) rows = rows.slice(0, limit);
+  renderBars(boxId, rows, S1,
+    r => [m.tip(r.value), `${r.label} · ${r.note.replace(/[()]/g, "")} game(s)`],
+    m.fmt, m.domain);
+}
+
+function renderTribes(gs) {
+  renderMetricBars("tribes", gs, g => g.tribe ? [g.tribe, g.tribe] : null, 0, BADGES.tribes);
 }
 
 function renderHeroes(gs) {
-  const byHero = new Map();  // key: base hero card (skins fold together)
+  // Keyed by base hero card so skins fold together.
+  renderMetricBars("heroes", gs, g => [g.heroCard || g.hero, g.hero], 0, BADGES.heroes);
+}
+
+function renderTrinkets(gs) {
+  renderMetricBars("trinkets", gs, g => (g.trinkets || []).map(t => [t.n, t.n]), 20, BADGES.trinkets);
+}
+
+// ------------------------------------------------------ hero offers table
+function renderHeroPicks(gs) {
+  const box = document.getElementById("heroPicks");
+  box.replaceChildren();
+  const m = metric();
+  const byHero = new Map();  // base card -> {name, offered, taken:[], passed:[]}
   for (const g of gs) {
-    if (!g.place) continue;
-    const key = g.heroCard || g.hero;
-    if (!byHero.has(key)) byHero.set(key, { name: g.hero, places: [] });
-    byHero.get(key).places.push(g.place);
+    if (!g.place || !g.choices || !g.choices.length) continue;
+    for (const c of g.choices) {
+      if (!byHero.has(c.card)) byHero.set(c.card, { card: c.card, name: c.n, offered: 0, taken: [], passed: [] });
+      const h = byHero.get(c.card);
+      h.offered++;
+      (c.card === g.heroCard ? h.taken : h.passed).push(m.value(g));
+    }
   }
-  const rows = [...byHero.values()]
-    .map(h => ({ label: h.name, value: h.places.reduce((a, b) => a + b, 0) / h.places.length,
-                 note: `(${h.places.length})` }))
-    .sort((a, b) => a.value - b.value);
-  renderBars("heroes", rows, S1,
-    r => [`avg #${r.value.toFixed(2)}`, `${r.label} · ${r.note.replace(/[()]/g, "")} game(s)`],
-    v => v.toFixed(2), 8);
+  const LIMIT = 30;
+  const eligible = [...byHero.values()].filter(h => h.offered >= 3)
+    .sort((a, b) => b.offered - a.offered || b.taken.length - a.taken.length);
+  const rows = eligible.slice(0, LIMIT);
+  if (!rows.length) { html(box, "div", "empty", "No hero offers recorded for this filter."); return; }
+
+  const table = document.createElement("table");
+  const hr = table.createTHead().insertRow();
+  const metricHead = m.kind === "share" ? "lobby beaten" : "avg place";
+  for (const h of ["Hero", "Offered", "Taken", "Pick rate", `${metricHead} when taken`, `${metricHead} when passed`, "Badges"])
+    html(hr, "th", "", h);
+  const tbody = table.createTBody();
+  const cell = (tr, vals) => {
+    const td = html(tr, "td", "num", vals.length ? m.fmt(mean(vals)) : "—");
+    if (vals.length && vals.length < 3) td.style.color = "var(--muted)";  // thin sample
+    return td;
+  };
+  for (const h of rows) {
+    const tr = tbody.insertRow();
+    html(tr, "td", "", h.name);
+    html(tr, "td", "num", String(h.offered));
+    html(tr, "td", "num", String(h.taken.length));
+    html(tr, "td", "num", `${Math.round(100 * h.taken.length / h.offered)}%`);
+    cell(tr, h.taken);
+    cell(tr, h.passed);
+    badgeChips(html(tr, "td", ""), BADGES.heroes[h.card]);
+  }
+  box.appendChild(table);
+  html(box, "div", "sub", (eligible.length > LIMIT ? `${LIMIT} most-offered of ${eligible.length} heroes. ` : "")
+    + "Greyed values rest on fewer than 3 games. "
+    + "\"When passed\" is how the game went with whichever hero you took instead.");
 }
 
 function renderRoundRecord(gs) {
@@ -469,36 +653,93 @@ setInterval(pollLive, 2000);
 pollLive();
 
 // ----------------------------------------------------------------- economy
-function topHalf(g) { return g.place <= (g.mode === "duos" ? 2 : 4); }
-
-function renderRolls(gs) {
-  const box = document.getElementById("rolls");
+function renderEcon(gs) {
+  const box = document.getElementById("econ");
   box.replaceChildren();
-  const pts = gs.filter(g => g.econ && g.place > 0);
+  const pts = gs.filter(g => g.econ && g.place > 0 && g.rounds > 0);
   if (!pts.length) {
     html(box, "div", "empty", "No games with economy data yet — plays from now on are tracked.");
     return;
   }
+  const groups = [["Top half", pts.filter(topHalf)], ["Bottom half", pts.filter(g => !topHalf(g))]]
+    .filter(([, xs]) => xs.length);
+  const cols = [
+    ["Games", xs => String(xs.length)],
+    ["Rolls", xs => mean(xs.map(g => g.econ.rolls)).toFixed(1)],
+    ["Rolls / round", xs => mean(xs.map(g => g.econ.rolls / g.rounds)).toFixed(2)],
+    ["Buys", xs => mean(xs.map(g => g.econ.buys)).toFixed(1)],
+    ["Sells", xs => mean(xs.map(g => g.econ.sells)).toFixed(1)],
+    ["Rounds", xs => mean(xs.map(g => g.rounds)).toFixed(1)],
+  ];
+  const table = document.createElement("table");
+  const hr = table.createTHead().insertRow();
+  html(hr, "th", "", "");
+  for (const [h] of cols) html(hr, "th", "", h);
+  const tbody = table.createTBody();
+  for (const [label, xs] of groups) {
+    const tr = tbody.insertRow();
+    html(tr, "td", "", label);
+    for (const [, f] of cols) html(tr, "td", "num", f(xs));
+  }
+  box.appendChild(table);
+}
+
+function renderHpCurve(gs) {
+  const box = document.getElementById("hpcurve");
+  box.replaceChildren();
+  const pts = gs.filter(g => g.place > 0 && g.hpTrack && g.hpTrack.length > 1);
+  if (!pts.length) { html(box, "div", "empty", "No health data for this filter."); return; }
+  const MIN_N = 3;  // games needed at a round before the average is drawn
+  // Health at round r = last recorded value at or before r (rounds without a
+  // snapshot keep the previous value); undefined once the game is over.
+  const hpAt = (g, r) => {
+    const last = g.hpTrack[g.hpTrack.length - 1][0];
+    if (r > last) return undefined;
+    let v;
+    for (const [rr, hp] of g.hpTrack) { if (rr > r) break; v = hp; }
+    return v === undefined ? undefined : Math.max(v, 0);
+  };
+  const maxR = Math.max(...pts.map(g => g.hpTrack[g.hpTrack.length - 1][0]));
+  const maxHp = Math.max(40, ...pts.flatMap(g => g.hpTrack.map(x => x[1])));
+  const series = [["top half", pts.filter(topHalf), S1], ["bottom half", pts.filter(g => !topHalf(g)), S2]]
+    .map(([label, xs, color]) => {
+      const curve = [];
+      for (let r = 1; r <= maxR; r++) {
+        const vals = xs.map(g => hpAt(g, r)).filter(v => v !== undefined);
+        if (vals.length < MIN_N) { if (curve.length) break; else continue; }
+        curve.push({ r, hp: mean(vals), n: vals.length });
+      }
+      return { label, color, curve };
+    }).filter(s => s.curve.length);
+
+  const legend = html(box, "div", "");
+  legend.style.cssText = "display:flex;gap:14px;font-size:12px;color:var(--ink-2);margin-bottom:6px";
+  for (const s of series) {
+    const item = html(legend, "span", "");
+    const sw = html(item, "span", "");
+    sw.style.cssText = `display:inline-block;width:10px;height:10px;border-radius:2px;background:${s.color};margin-right:5px`;
+    item.append(document.createTextNode(s.label));
+  }
+
   const W = 440, H = 190, L = 34, R = 12, T = 10, B = 28;
   const svg = el(null, "svg", { viewBox: `0 0 ${W} ${H}` });
-  const maxRolls = Math.max(...pts.map(g => g.econ.rolls), 5);
-  const x = v => L + v / maxRolls * (W - L - R);
-  const y = p => T + (p - 1) / 7 * (H - T - B);
-  for (const p of [1, 4, 8]) {
-    el(svg, "line", { x1: L, x2: W - R, y1: y(p), y2: y(p), stroke: "var(--grid)", "stroke-width": 1 });
-    el(svg, "text", { x: L - 6, y: y(p) + 4, "text-anchor": "end", fill: "var(--muted)", "font-size": 11 }).textContent = "#" + p;
+  const x = r => L + (r - 1) / Math.max(maxR - 1, 1) * (W - L - R);
+  const y = hp => T + (1 - hp / maxHp) * (H - T - B);
+  for (const t of [0, 20, 40, 60].filter(t => t <= maxHp)) {
+    el(svg, "line", { x1: L, x2: W - R, y1: y(t), y2: y(t), stroke: "var(--grid)", "stroke-width": 1 });
+    el(svg, "text", { x: L - 6, y: y(t) + 4, "text-anchor": "end", fill: "var(--muted)", "font-size": 11 }).textContent = String(t);
   }
-  const step = maxRolls > 30 ? 10 : 5;
-  for (let v = 0; v <= maxRolls; v += step) {
-    el(svg, "text", { x: x(v), y: H - 10, "text-anchor": "middle", fill: "var(--muted)", "font-size": 11 }).textContent = String(v);
+  const step = maxR > 12 ? 3 : 2;
+  for (let r = 1; r <= maxR; r += step) {
+    el(svg, "text", { x: x(r), y: H - 10, "text-anchor": "middle", fill: "var(--muted)", "font-size": 11 }).textContent = "r" + r;
   }
-  el(svg, "text", { x: W - R, y: H - 10, "text-anchor": "end", fill: "var(--muted)", "font-size": 11 }).textContent = "rolls";
-  for (const g of pts) {
-    el(svg, "circle", { cx: x(g.econ.rolls), cy: y(g.place), r: 5, fill: S1,
-                        stroke: "var(--surface)", "stroke-width": 2 });
-    const hit = el(svg, "circle", { cx: x(g.econ.rolls), cy: y(g.place), r: 14, fill: "transparent" });
-    hoverable(hit, () => [`#${g.place} · ${g.econ.rolls} rolls`,
-                          `${g.hero} · ${g.econ.buys} buys, ${g.econ.sells} sells · ${g.ts}`]);
+  for (const s of series) {
+    el(svg, "polyline", { points: s.curve.map(p => `${x(p.r)},${y(p.hp)}`).join(" "), fill: "none",
+                          stroke: s.color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" });
+    for (const p of s.curve) {
+      const hit = el(svg, "circle", { cx: x(p.r), cy: y(p.hp), r: 9, fill: "transparent" });
+      hoverable(hit, () => [`${p.hp.toFixed(0)} health at round ${p.r}`, `${s.label} · ${p.n} game(s) still alive`]);
+    }
   }
   box.appendChild(svg);
 }
@@ -590,7 +831,7 @@ function renderTable(gs) {
     html(tr, "td", "", g.tribe || "—");
     html(tr, "td", "num", g.place ? "#" + g.place : "—");
     html(tr, "td", "num", String(g.rounds || "—"));
-    tr.insertCell().appendChild(sparkline(g.hp));
+    tr.insertCell().appendChild(sparkline((g.hpTrack || []).map(x => x[1])));
     const wins = g.fights.filter(f => f.res === "win").length;
     const losses = g.fights.filter(f => f.res === "loss").length;
     html(tr, "td", "num", `${wins}W ${losses}L`);
@@ -625,12 +866,17 @@ function render() {
   for (const b of filterBox.children) b.classList.toggle("on", b.dataset.mode === mode);
   for (const b of patchBox.children) b.classList.toggle("on", b.dataset.patch === patch);
   const gs = games();
+  const m = metric();
+  for (const n of document.querySelectorAll(".metricName")) n.textContent = m.name;
   renderTiles(gs);
   renderTimeline(gs);
   renderTribes(gs);
   renderHeroes(gs);
+  renderHeroPicks(gs);
   renderRoundRecord(gs);
-  renderRolls(gs);
+  renderEcon(gs);
+  renderHpCurve(gs);
+  renderTrinkets(gs);
   renderTierPace(gs);
   renderMinions(gs);
   renderRoundMinions(gs);

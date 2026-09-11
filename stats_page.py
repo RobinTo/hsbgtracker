@@ -14,6 +14,7 @@ import webbrowser
 from pathlib import Path
 from types import SimpleNamespace
 
+from badges import compute_badges
 from cards import CardDb
 from stats import load_games, own_snaps
 
@@ -24,8 +25,9 @@ OUTPUT = Path(__file__).with_name("stats.html")
 def build_html(cards: CardDb | None = None) -> str:
     """Compose the dashboard HTML with fresh data embedded."""
     cards = cards or CardDb()
+    games = load_games()
     records = []
-    for g in load_games():
+    for g in games:
         snaps = own_snaps(g)
         final = snaps[-1] if snaps else None
         tribe = ""
@@ -59,6 +61,21 @@ def build_html(cards: CardDb | None = None) -> str:
                 if lvl > last:
                     tier_ups.append([s["round_num"], lvl])
                     last = lvl
+        # Hero offers at pick time (skins fold into the base card), so the page
+        # can compare heroes you took against ones you passed on.
+        choices = []
+        for c in g.get("choices") or []:
+            base = (c.get("card") or "").split("_SKIN_")[0]
+            if base:
+                choices.append({"card": base, "n": cards.name(base, c.get("n", ""))})
+        # Trinkets in the order taken, with the round each first appeared.
+        trinkets = []
+        seen_trinkets = set()
+        for s in snaps:
+            for t in s.get("trinkets") or []:
+                if t not in seen_trinkets:
+                    seen_trinkets.add(t)
+                    trinkets.append({"n": cards.name(t), "r": s["round_num"]})
         fights = [
             {
                 "r": s["round_num"],
@@ -80,13 +97,15 @@ def build_html(cards: CardDb | None = None) -> str:
                     else g.get("heroes", {}).get(str(g.get("own_pid")), "?")
                 ),
                 "heroCard": hero_card,
+                "choices": choices,
                 "patch": g.get("patch", ""),
                 "econ": g.get("econ"),  # null on records from before v2.3
                 "tierUps": tier_ups,
                 "place": g.get("place", 0),
                 "rounds": rounds,
                 "tribe": tribe,
-                "hp": [hp for _r, hp in hp_track],
+                "hpTrack": hp_track,  # [[round, hp+armor], ...]
+                "trinkets": trinkets,
                 "finalBoard": final_board,
                 "fights": fights,
             }
@@ -95,6 +114,8 @@ def build_html(cards: CardDb | None = None) -> str:
     data = {
         "generated": time.strftime("%Y-%m-%d %H:%M"),
         "games": records,
+        # Career-wide verdicts per hero (base card), tribe and trinket name.
+        "badges": compute_badges(games, cards),
     }
     return TEMPLATE.read_text(encoding="utf-8").replace(
         "/*__DATA__*/", json.dumps(data, ensure_ascii=False).replace("<", "\\u003c")

@@ -18,9 +18,11 @@ from pathlib import Path
 
 import tkinter as tk
 
+from badges import compute_badges, game_summary
 from cards import CardDb
 from images import ArtStore
 from parser import BgGame
+from stats import load_games
 
 POLL_SECONDS = 1.0
 CONFIG_FILE = Path(__file__).with_name("tracker_config.json")
@@ -185,6 +187,14 @@ def load_career() -> dict:
     except OSError:
         pass
     return out
+
+
+def load_badges(cards: CardDb) -> dict:
+    """Career badges per base hero card, e.g. "Wins early" (see badges.py)."""
+    try:
+        return compute_badges(load_games(), cards)["heroes"]
+    except Exception:
+        return {}  # badges are decoration; never block the tracker on them
 
 
 def set_app_identity(root: tk.Tk):
@@ -497,6 +507,7 @@ class TrackerApp:
         self._prev_next_opp = 0
         self._recap_shown = False
         self._career = load_career()
+        self._badges = load_badges(self.cards)
         self.tailer: LogTailer | None = None
         self._patch_cache: tuple[Path | None, str] = (None, "")
         self._last_data = 0.0
@@ -582,12 +593,20 @@ class TrackerApp:
         geom = self.root.geometry()
         if self.collapsed:
             # position-only: mini size is content-driven, never restored
-            pos = geom.split("+", 1)
-            if len(pos) > 1:
-                cfg["geometry_mini"] = "+" + pos[1]
+            cfg["geometry_mini"] = "+%d+%d" % self._mini_pos()
         else:
             cfg["geometry"] = geom
         save_config(cfg)
+
+    def _mini_pos(self) -> tuple[int, int]:
+        """Top-left of the mini icon: the anchor when known, else the window."""
+        if self._mini_anchor is not None:
+            return self._mini_anchor
+        try:
+            x, y = (int(v) for v in self.root.geometry().split("+")[1:3])
+        except (ValueError, IndexError):
+            x, y = self.root.winfo_x(), self.root.winfo_y()
+        return x, y
 
     def _drag_start(self, event):
         try:  # offset from the geometry string, exact for the frameless window
@@ -597,7 +616,10 @@ class TrackerApp:
         self._drag = (event.x_root - x, event.y_root - y)
 
     def _drag_move(self, event):
-        self.root.geometry(f"+{event.x_root - self._drag[0]}+{event.y_root - self._drag[1]}")
+        x, y = event.x_root - self._drag[0], event.y_root - self._drag[1]
+        self.root.geometry(f"+{x}+{y}")
+        if self.collapsed:  # the icon follows the expanded panel's top-left
+            self._mini_anchor = (x, y)
 
     def _on_configure(self, event):
         if event.widget is not self.root:
@@ -613,9 +635,7 @@ class TrackerApp:
     def _toggle_mini(self):
         cfg = load_config()
         if self.collapsed:
-            pos = self.root.geometry().split("+", 1)
-            if len(pos) > 1:
-                cfg["geometry_mini"] = "+" + pos[1]
+            cfg["geometry_mini"] = "+%d+%d" % self._mini_pos()
         else:
             cfg["geometry"] = self.root.geometry()
         self.collapsed = not self.collapsed
@@ -627,7 +647,14 @@ class TrackerApp:
             self.root.resizable(False, False)
             self.root.minsize(1, 1)
             self.mini_state = "icon"
-            self._mini_anchor = None  # icon lands where the window is now
+            # The icon returns to where it last sat, not the full window's corner.
+            self._mini_anchor = None
+            geom = cfg.get("geometry_mini") or ""
+            try:
+                x, y = (int(v) for v in geom.split("+")[1:3])
+                self._mini_anchor = (x, y)
+            except ValueError:
+                pass
         else:
             self._set_mini_chrome(False)
             self.root.resizable(True, True)
@@ -873,68 +900,81 @@ class TrackerApp:
 
     # ------------------------------------------------------ game persistence
 
+    def _game_record(self, view) -> dict:
+        """The finished game as a games_history.jsonl record (not yet saved)."""
+        # Signature from facts stable across a re-parse of the same game
+        # (a tracker restart can re-read the ending with slightly
+        # different hp values, so those stay out of the signature).
+        sig_src = json.dumps(
+            [
+                sorted(view["names"].items()),
+                [r for r, _hp in view["hp_track"]],
+                "duos" if view["teams"] else "solo",
+                view["friendly"],
+            ],
+            default=str,
+        )
+        sig = hashlib.md5(sig_src.encode()).hexdigest()[:12]
+        place = view["statuses"].get(view["friendly"], {}).get("place", 0)
+        if not place and view["teammate"]:
+            place = view["statuses"].get(view["teammate"], {}).get("place", 0)
+        log_dir = self.tailer.current.parent if (
+            self.tailer and self.tailer.current
+        ) else None
+        if self._patch_cache[0] != log_dir:
+            self._patch_cache = (log_dir, read_game_patch(log_dir))
+        return {
+            "sig": sig,
+            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "patch": self._patch_cache[1],
+            "mode": "duos" if view["teams"] else "solo",
+            "own_pid": view["friendly"],
+            "teammate": view["teammate"],
+            "place": place,
+            "choices": [
+                {"card": c, "n": n or self.cards.name(c)}
+                for c, n, _p in view.get("choices", [])
+            ],
+            "econ": view.get("econ", {}),
+            "tierUps": view.get("tier_ups", []),
+            "teams": view["teams"],
+            "names": view["names"],
+            "heroes": {
+                p: (h.name or h.card_id) for p, h in view["heroes"].items()
+            },
+            "statuses": view["statuses"],
+            "hp_track": view["hp_track"],
+            "history": {
+                p: [asdict(s) for s in snaps]
+                for p, snaps in view["history"].items()
+            },
+        }
+
     def _persist_game(self, view):
         try:
-            # Signature from facts stable across a re-parse of the same game
-            # (a tracker restart can re-read the ending with slightly
-            # different hp values, so those stay out of the signature).
-            sig_src = json.dumps(
-                [
-                    sorted(view["names"].items()),
-                    [r for r, _hp in view["hp_track"]],
-                    "duos" if view["teams"] else "solo",
-                    view["friendly"],
-                ],
-                default=str,
-            )
-            sig = hashlib.md5(sig_src.encode()).hexdigest()[:12]
+            rec = self._game_record(view)
             if HISTORY_FILE.exists():
                 # Records are a few hundred KB each — scan a window that
                 # covers the last several games, not just the last one's tail.
                 with open(HISTORY_FILE, "rb") as fh:
                     fh.seek(0, 2)
                     fh.seek(max(0, fh.tell() - 8 * 1024 * 1024))
-                    if sig.encode() in fh.read():
+                    if rec["sig"].encode() in fh.read():
                         return
-            place = view["statuses"].get(view["friendly"], {}).get("place", 0)
-            if not place and view["teammate"]:
-                place = view["statuses"].get(view["teammate"], {}).get("place", 0)
-            log_dir = self.tailer.current.parent if (
-                self.tailer and self.tailer.current
-            ) else None
-            if self._patch_cache[0] != log_dir:
-                self._patch_cache = (log_dir, read_game_patch(log_dir))
-            rec = {
-                "sig": sig,
-                "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "patch": self._patch_cache[1],
-                "mode": "duos" if view["teams"] else "solo",
-                "own_pid": view["friendly"],
-                "teammate": view["teammate"],
-                "place": place,
-                "choices": [
-                    {"card": c, "n": n or self.cards.name(c)}
-                    for c, n, _p in view.get("choices", [])
-                ],
-                "econ": view.get("econ", {}),
-                "tierUps": view.get("tier_ups", []),
-                "teams": view["teams"],
-                "names": view["names"],
-                "heroes": {
-                    p: (h.name or h.card_id) for p, h in view["heroes"].items()
-                },
-                "statuses": view["statuses"],
-                "hp_track": view["hp_track"],
-                "history": {
-                    p: [asdict(s) for s in snaps]
-                    for p, snaps in view["history"].items()
-                },
-            }
             with open(HISTORY_FILE, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
             self._career = load_career()
+            self._badges = load_badges(self.cards)
         except Exception:
             pass  # never let stats bookkeeping break the tracker
+
+    def _game_summary(self, view) -> dict:
+        """Badges and fact lines for the game that just ended (see
+        badges.game_summary). Empty on any failure — it's decoration."""
+        try:
+            return game_summary(self._game_record(view), load_games(), self.cards)
+        except Exception:
+            return {"badges": [], "facts": []}
 
     def _open_stats(self):
         self._open_page("/", "stats_page")
@@ -1735,6 +1775,15 @@ class TrackerApp:
                 display = name or self.cards.name(cid)
             tk.Label(row, text=display, bg=BG_ROW, fg=FG,
                      font=(UI, 10, "bold")).pack(side="left")
+            # Career badges: verdicts first, neutral tempo/economy notes after.
+            rank = {"good": 0, "bad": 0, "neutral": 1}
+            badges = sorted(self._badges.get(base, []), key=lambda b: rank.get(b["tone"], 2))
+            for b in badges[:3]:
+                fg = {"good": GREEN, "bad": ACCENT}.get(b["tone"], FG_DIM)
+                chip = tk.Label(row, text=b["label"], bg=BG_CHIP, fg=fg,
+                                font=(UI, 8, "bold"), padx=5)
+                chip.pack(side="left", padx=(6, 0))
+                self.tooltip.attach(chip, b["label"], b["detail"])
             career = self._career.get(base)
             if career and career["places"]:
                 ps = career["places"]
@@ -1792,7 +1841,7 @@ class TrackerApp:
 
         placed = sorted((st.get("place", 9), p) for p, st in view["statuses"].items())
         row = tk.Frame(box, bg=BG_ROW)
-        row.pack(fill="x", padx=16, pady=(0, 10))
+        row.pack(fill="x", padx=16, pady=(0, 6))
         shown = set()
         for pl, p in placed:
             if not pl or pl > 8 or p not in view["heroes"] or pl in shown and view["teams"]:
@@ -1803,6 +1852,22 @@ class TrackerApp:
             tk.Label(row, text=f"#{pl} {nm}{you}   ", bg=BG_ROW,
                      fg=FG if p == view["friendly"] else FAINT,
                      font=(UI, 9)).pack(side="left")
+
+        # Match summary: badges earned this game, then fact lines.
+        summary = self._game_summary(view) if place else {"badges": [], "facts": []}
+        if summary["badges"]:
+            chips = tk.Frame(box, bg=BG_ROW)
+            chips.pack(fill="x", padx=16, pady=(2, 4))
+            for b in summary["badges"][:7]:
+                fg = {"good": GREEN, "bad": ACCENT}.get(b["tone"], FG_DIM)
+                chip = tk.Label(chips, text=b["label"], bg=BG_CHIP, fg=fg,
+                                font=(UI, 8, "bold"), padx=6, pady=1)
+                chip.pack(side="left", padx=(0, 6))
+                self.tooltip.attach(chip, b["label"], b["detail"])
+        for fact in summary["facts"][:6]:
+            tk.Label(box, text=fact, bg=BG_ROW, fg=FG_DIM, font=(UI, 9),
+                     anchor="w").pack(fill="x", padx=16)
+        tk.Frame(box, bg=BG_ROW, height=8).pack()
 
     # ------------------------------------------------------------------ lobby
 

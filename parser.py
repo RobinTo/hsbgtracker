@@ -58,6 +58,10 @@ class Entity:
     card_id: str = ""
     name: str = ""
     tags: dict = field(default_factory=dict)
+    # Set once a CHANGE_ENTITY rewrote the card (hero-pick reroll). Log lines
+    # that follow still reference the entity with its OLD name/cardId, so
+    # bracket refs must not be trusted to update identity afterwards.
+    transformed: bool = False
 
     def tag(self, name, default=0):
         return self.tags.get(name, default)
@@ -234,7 +238,12 @@ class BgGame:
                     # reroll): the old display name no longer applies.
                     ent.card_id = card
                     ent.name = ""
-            self._pending_entity = None
+                    ent.transformed = True
+                # The indented tag block that follows describes the new card
+                # (hero power etc.), so keep applying it to this entity.
+                self._pending_entity = ent
+            else:
+                self._pending_entity = None
             return
 
         m = RE_TAG_CHANGE.match(stripped)
@@ -289,12 +298,15 @@ class BgGame:
         m = RE_BRACKET_REF.search(ref)
         if m:
             ent = self._entity(int(m.group("id")))
+            card = m.group("card")
+            if ent.transformed and card and card != ent.card_id:
+                return ent  # stale ref from before the transform; ignore identity
             if m.group("name") and m.group("name") != "UNKNOWN ENTITY":
                 ent.name = m.group("name")
-                if m.group("card"):
-                    self.learned_names[m.group("card")] = ent.name
-            if m.group("card"):
-                ent.card_id = m.group("card")
+                if card:
+                    self.learned_names[card] = ent.name
+            if card:
+                ent.card_id = card
             return ent
         if ref.isdigit():
             return self._entity(int(ref))
