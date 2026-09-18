@@ -46,6 +46,7 @@ def build_html(cards: CardDb | None = None) -> str:
         "spells": pool.get("spells", []),
         "trinkets": pool.get("trinkets", []),
         "heroes": pool.get("heroes", []),
+        "buddies": pool.get("buddies", []),
         "career": _hero_career(),
     }
     return TEMPLATE.read_text(encoding="utf-8").replace(

@@ -82,7 +82,13 @@
     padding: 7px 10px; font-size: 12px; max-width: 260px; box-shadow: 0 4px 14px rgba(0,0,0,.5);
   }
   #tooltip .v { font-size: 14px; font-weight: 600; }
-  #tooltip .k { color: var(--ink-2); }
+  #tooltip .k { color: var(--ink-2); white-space: pre-line; }
+  .help {
+    display: inline-block; width: 15px; height: 15px; line-height: 15px; text-align: center;
+    border-radius: 50%; background: var(--surface-2); color: var(--muted);
+    font-size: 10px; font-weight: 600; margin-left: 4px; vertical-align: 1px; cursor: help;
+  }
+  .help:hover { color: var(--ink); }
 </style>
 </head>
 <body>
@@ -101,7 +107,7 @@
       <div id="timeline"></div>
     </div>
     <div class="card">
-      <h2><span class="metricName"></span> by final tribe</h2>
+      <h2><span class="metricName"></span> by final tribe <span class="help metricHelp">?</span></h2>
       <div id="tribes"></div>
     </div>
     <div class="card">
@@ -109,7 +115,7 @@
       <div id="roundrec"></div>
     </div>
     <div class="card wide">
-      <h2><span class="metricName"></span> by hero</h2>
+      <h2><span class="metricName"></span> by hero <span class="help metricHelp">?</span></h2>
       <div id="heroes"></div>
     </div>
     <div class="card wide">
@@ -134,7 +140,7 @@
       <div id="hpcurve"></div>
     </div>
     <div class="card wide">
-      <h2><span class="metricName"></span> by trinket <span style="color:var(--muted);font-weight:400">(both trinkets count)</span></h2>
+      <h2><span class="metricName"></span> by trinket <span class="help metricHelp">?</span> <span style="color:var(--muted);font-weight:400">(both trinkets count)</span></h2>
       <div id="trinkets"></div>
     </div>
     <div class="card">
@@ -277,6 +283,19 @@ function metric() {
 }
 const mean = xs => xs.reduce((a, b) => a + b, 0) / xs.length;
 
+// Explanation behind the "?" next to the metric bar sections.
+function metricHelp(m) {
+  const first = m.kind === "share"
+    ? "Blue bar — Lobby beaten: the share of the lobby you finished ahead of, averaged over these games. " +
+      "Solo: 1st = 100%, 4th = 57%, 8th = 0%. Duos: 1st = 100%, 2nd = 67%, 3rd = 33%, 4th = 0%. " +
+      "Lets solo and duos share one scale."
+    : "Blue bar — Average placement: your mean final placement in these games. Lower is better.";
+  return ["Reading these bars",
+          first + "\n\nOrange bar — Top half: how often you finished in the top half " +
+          "(top 4 in solo, top 2 in duos).\n\n(n) is the number of games. " +
+          "Rows with fewer than 3 games are faded and sorted last."];
+}
+
 // Placement axis for a scatter/timeline: y(value) plus the gridline values.
 function placeAxis(m, top, bottom) {
   const h = bottom - top;
@@ -396,14 +415,17 @@ function renderTimeline(gs) {
 }
 
 // -------------------------------------------------- generic horizontal bars
-function renderBars(boxId, rows, color, tipFn, valueFmt, domainMax) {
-  // rows: [{label, value, note}]
+function renderBars(boxId, rows, color, tipFn, valueFmt, domainMax, second) {
+  // rows: [{label, value, note}]. With `second` ({color, fmt, max}) each row
+  // also carries value2, drawn as a second bar in the same row height.
   const box = document.getElementById(boxId);
   box.replaceChildren();
   if (!rows.length) { html(box, "div", "empty", "No data for this filter."); return; }
   // Full-width cards get a wider viewBox so text keeps its size when scaled.
   const wide = box.closest(".card").classList.contains("wide");
-  const W = wide ? 940 : 440, rowH = 26, barH = 16, labelW = wide ? 190 : 150, valueW = 64;
+  const W = wide ? 940 : 440, rowH = 26, barH = 16, labelW = wide ? 190 : 150;
+  // Two series need room for both values plus the game count after the longest bar.
+  const valueW = second ? (wide ? 140 : 120) : 64;
   const H = rows.length * rowH + 4;
   const svg = el(null, "svg", { viewBox: `0 0 ${W} ${H}` });
   const trackW = W - labelW - valueW;
@@ -416,26 +438,43 @@ function renderBars(boxId, rows, color, tipFn, valueFmt, domainMax) {
     const maxChars = wide ? 26 : 20;
     lab.textContent = r.label.length > maxChars ? r.label.slice(0, maxChars - 1) + "…" : r.label;
     const w = Math.max(2, r.value / max * trackW);
-    const bar = el(svg, "path", { d: barPath(labelW, yTop, w, barH), fill: color });
-    if (r.thin) { bar.setAttribute("fill-opacity", 0.4); lab.setAttribute("fill", "var(--muted)"); }
-    const val = el(svg, "text", { x: labelW + w + 6, y: yTop + barH - 4, fill: "var(--ink)",
+    const bars = [];
+    let textX;
+    if (second) {
+      // Two thin bars share the 16px band: primary on top, second below.
+      const h1 = 7, gap = 2, h2 = barH - h1 - gap;
+      const w2 = Math.max(2, (r.value2 || 0) / (second.max || 100) * trackW);
+      bars.push(el(svg, "path", { d: barPath(labelW, yTop, w, h1), fill: color }));
+      bars.push(el(svg, "path", { d: barPath(labelW, yTop + h1 + gap, w2, h2), fill: second.color }));
+      textX = labelW + Math.max(w, w2) + 6;
+    } else {
+      bars.push(el(svg, "path", { d: barPath(labelW, yTop, w, barH), fill: color }));
+      textX = labelW + w + 6;
+    }
+    if (r.thin) { bars.forEach(b => b.setAttribute("fill-opacity", 0.4)); lab.setAttribute("fill", "var(--muted)"); }
+    const val = el(svg, "text", { x: textX, y: yTop + barH - 4, fill: "var(--ink)",
                                   "font-size": 12, "font-weight": 600 });
     val.textContent = valueFmt(r.value);
+    let x = textX + String(valueFmt(r.value)).length * 7 + 6;
+    if (second) {
+      const v2 = el(svg, "text", { x, y: yTop + barH - 4, fill: second.color,
+                                   "font-size": 12, "font-weight": 600 });
+      v2.textContent = second.fmt(r.value2 || 0);
+      x += String(v2.textContent).length * 7 + 6;
+    }
     if (r.note) {
-      const note = el(svg, "text", { x: labelW + w + 6 + String(valueFmt(r.value)).length * 7 + 6,
-                                     y: yTop + barH - 4, fill: "var(--muted)", "font-size": 11 });
+      const note = el(svg, "text", { x, y: yTop + barH - 4, fill: "var(--muted)", "font-size": 11 });
       note.textContent = r.note;
+      x += r.note.length * 6 + 6;
     }
     const hit = el(svg, "rect", { x: 0, y: i * rowH, width: W, height: rowH, fill: "transparent" });
-    bar.style.transition = "filter .1s";
-    hit.addEventListener("pointerenter", () => bar.style.filter = "brightness(1.2)");
-    hit.addEventListener("pointerleave", () => { bar.style.filter = ""; hideTip(); });
+    bars.forEach(b => b.style.transition = "filter .1s");
+    hit.addEventListener("pointerenter", () => bars.forEach(b => b.style.filter = "brightness(1.2)"));
+    hit.addEventListener("pointerleave", () => { bars.forEach(b => b.style.filter = ""); hideTip(); });
     hoverable(hit, () => tipFn(r));
     if (r.badges && r.badges.length) {
       // Chips go after the value/note text and above the hit rect so they get their own hover.
-      const textEnd = labelW + w + 6 + String(valueFmt(r.value)).length * 7 + 6
-        + (r.note ? r.note.length * 6 + 6 : 0);
-      drawBadges(svg, textEnd, yTop, barH, r.badges);
+      drawBadges(svg, x, yTop, barH, r.badges);
     }
   });
   box.appendChild(svg);
@@ -452,20 +491,22 @@ function renderMetricBars(boxId, gs, keyFn, limit, badgeMap) {
     if (!kls || !kls.length) continue;
     if (!Array.isArray(kls[0])) kls = [kls];
     for (const [key, label] of kls) {
-      if (!groups.has(key)) groups.set(key, { key, label, vals: [] });
+      if (!groups.has(key)) groups.set(key, { key, label, vals: [], tops: 0 });
       groups.get(key).vals.push(m.value(g));
+      groups.get(key).tops += topHalf(g) ? 1 : 0;
     }
   }
   // Rows resting on fewer than MIN_N games sort below the rest and render faded.
   const MIN_N = 3;
   let rows = [...groups.values()]
-    .map(h => ({ label: h.label, value: mean(h.vals), note: `(${h.vals.length})`, thin: h.vals.length < MIN_N,
+    .map(h => ({ label: h.label, value: mean(h.vals), value2: 100 * h.tops / h.vals.length,
+                 note: `(${h.vals.length})`, thin: h.vals.length < MIN_N,
                  badges: badgeMap ? badgeMap[h.key] : null }))
     .sort((a, b) => (a.thin - b.thin) || (m.lowIsGood ? a.value - b.value : b.value - a.value));
   if (limit) rows = rows.slice(0, limit);
   renderBars(boxId, rows, S1,
-    r => [m.tip(r.value), `${r.label} · ${r.note.replace(/[()]/g, "")} game(s)`],
-    m.fmt, m.domain);
+    r => [m.tip(r.value), `top half in ${r.value2.toFixed(0)}% of games\n${r.label} · ${r.note.replace(/[()]/g, "")} game(s)`],
+    m.fmt, m.domain, { color: S2, fmt: v => v.toFixed(0) + "%", max: 100 });
 }
 
 function renderTribes(gs) {
@@ -868,6 +909,7 @@ function render() {
   const gs = games();
   const m = metric();
   for (const n of document.querySelectorAll(".metricName")) n.textContent = m.name;
+  for (const n of document.querySelectorAll(".metricHelp")) hoverable(n, () => metricHelp(m));
   renderTiles(gs);
   renderTimeline(gs);
   renderTribes(gs);

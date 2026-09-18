@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 from badges import compute_badges
 from cards import CardDb
-from stats import load_games, own_snaps
+from stats import load_games, own_snaps, team_snaps
 
 TEMPLATE = Path(__file__).with_name("stats_template.html")
 OUTPUT = Path(__file__).with_name("stats.html")
@@ -76,6 +76,7 @@ def build_html(cards: CardDb | None = None) -> str:
                 if t not in seen_trinkets:
                     seen_trinkets.add(t)
                     trinkets.append({"n": cards.name(t), "r": s["round_num"]})
+        # Every combat the team fought; the board is only ours when we have it.
         fights = [
             {
                 "r": s["round_num"],
@@ -83,9 +84,9 @@ def build_html(cards: CardDb | None = None) -> str:
                 "dmg": s.get("result_dmg", 0),
                 "board": [
                     cards.name(m["card_id"], m.get("name", "")) for m in s["minions"]
-                ],
+                ] if own else [],
             }
-            for s in snaps
+            for s, own in team_snaps(g)
         ]
         records.append(
             {

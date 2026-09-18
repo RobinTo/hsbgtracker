@@ -15,7 +15,7 @@ from pathlib import Path
 
 CACHE_FILE = Path(__file__).with_name("cards_cache.json")
 HSJSON_URL = "https://api.hearthstonejson.com/v1/latest/enUS/cards.json"
-CACHE_VERSION = 5
+CACHE_VERSION = 6
 
 TAG_RE = re.compile(r"</?[bi]>|\[x\]")
 
@@ -78,8 +78,14 @@ class CardDb:
                     cards = json.load(resp)
                 slim = {}
                 dbf = {}
-                bg = {"minions": [], "spells": [], "trinkets": [], "heroes": []}
+                bg = {"minions": [], "spells": [], "trinkets": [], "heroes": [],
+                      "buddies": []}
                 by_dbf_full = {c["dbfId"]: c for c in cards if "dbfId" in c}
+                # buddy dbfId -> the hero it belongs to
+                hero_of_buddy = {
+                    c["battlegroundsBuddyDbfId"]: c for c in cards
+                    if c.get("battlegroundsHero") and c.get("battlegroundsBuddyDbfId")
+                }
                 for c in cards:
                     if "name" not in c:
                         continue
@@ -100,6 +106,16 @@ class CardDb:
                             "r": races, "x": text, "a": c.get("attack", 0),
                             "h": c.get("health", 0), "m": mech, "d": duos,
                         })
+                    elif c.get("isBattlegroundsBuddy"):
+                        if c.get("battlegroundsNormalDbfId"):
+                            continue  # golden copy — the base card covers it
+                        hero = hero_of_buddy.get(c.get("dbfId"), {})
+                        bg["buddies"].append({
+                            "id": c["id"], "n": c["name"], "t": c.get("techLevel", 0),
+                            "r": races, "x": text, "a": c.get("attack", 0),
+                            "h": c.get("health", 0), "m": mech,
+                            "hn": hero.get("name", ""), "hid": hero.get("id", ""),
+                        })
                     elif c.get("isBattlegroundsPoolSpell"):
                         bg["spells"].append({
                             "id": c["id"], "n": c["name"], "t": c.get("techLevel", 0),
@@ -113,12 +129,15 @@ class CardDb:
                         })
                     elif c.get("battlegroundsHero"):
                         power = by_dbf_full.get(c.get("heroPowerDbfId"), {})
+                        buddy = by_dbf_full.get(c.get("battlegroundsBuddyDbfId"), {})
                         bg["heroes"].append({
                             "id": c["id"], "n": c["name"],
                             "ar": c.get("armor", 0),
                             "pn": power.get("name", ""),
                             "px": TAG_RE.sub("", power.get("text", ""))
                                   .replace("\n", " ").strip(),
+                            "bn": buddy.get("name", ""),
+                            "bt": buddy.get("techLevel", 0),
                         })
                 with self._lock:
                     self._cards = slim
@@ -202,7 +221,7 @@ class CardDb:
             return self._dbf.get(str(dbf_id), "")
 
     def bg_pool(self) -> dict:
-        """Current Battlegrounds pool (minions/spells/trinkets/heroes),
+        """Current Battlegrounds pool (minions/spells/trinkets/heroes/buddies),
         empty until the card DB has downloaded at least once."""
         with self._lock:
             return self._bg

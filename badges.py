@@ -20,7 +20,7 @@ import re
 from collections import Counter, defaultdict
 from types import SimpleNamespace
 
-from stats import own_snaps
+from stats import own_snaps, team_snaps
 
 MIN_GAMES = 5        # subject needs this many placed games for any badge
 MIN_FIGHTS = 15      # ...and this many fights for a fight-rate badge
@@ -85,7 +85,7 @@ def _derive(g: dict, cards) -> SimpleNamespace | None:
         hero=hero,
         tribe=tribe,
         trinkets=trinkets,
-        fights=[(s["round_num"], s.get("result")) for s in snaps
+        fights=[(s["round_num"], s.get("result")) for s, _own in team_snaps(g)
                 if s.get("result") in ("win", "loss")],
         tier_round=tier_round,
         hp_track=hp_track,
@@ -305,8 +305,8 @@ def game_summary(rec: dict, prior_games: list[dict], cards) -> dict:
         badges.append({"id": label.lower().replace(" ", "-"), "label": label,
                        "tone": tone, "detail": detail})
 
-    snaps = own_snaps(rec)
-    results = [(s["round_num"], s.get("result"), s.get("result_dmg", 0)) for s in snaps
+    results = [(s["round_num"], s.get("result"), s.get("result_dmg", 0))
+               for s, _own in team_snaps(rec)
                if s.get("result") in ("win", "loss", "tie")]
     wins = [(r, d) for r, res, d in results if res == "win"]
     losses = [(r, d) for r, res, d in results if res == "loss"]

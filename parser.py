@@ -540,12 +540,17 @@ class BgGame:
         return best
 
     def _flush_pending_swaps(self):
+        # Runs at the first attack or at combat end: placement is complete,
+        # so an empty board here is genuinely empty (e.g. no minion bought in
+        # round 1, or a duos partner swapping in with nothing left). Record
+        # it, so the combat and its result still enter the history.
         if self._pending_swap:
-            self._take_snapshot(self._pending_swap)
+            self._take_snapshot(self._pending_swap, allow_empty=True)
             self._last_combat_pid = self._pending_swap
             self._pending_swap = 0
         if self._pending_friendly_swap:
-            self._take_snapshot(self._pending_friendly_swap, friendly_side=True)
+            self._take_snapshot(self._pending_friendly_swap, friendly_side=True,
+                                allow_empty=True)
             self._last_friendly_pid = self._pending_friendly_swap
             self._pending_friendly_swap = 0
 
@@ -645,11 +650,12 @@ class BgGame:
                 hero_power = ent.card_id
         return trinkets, hero_power
 
-    def _take_snapshot(self, opponent_id: int, friendly_side: bool = False):
+    def _take_snapshot(self, opponent_id: int, friendly_side: bool = False,
+                       allow_empty: bool = False):
         controller = self.friendly_controller if friendly_side else self.enemy_controller
         board = self._board(controller)
-        if not board:
-            return  # nothing placed — don't overwrite a good snapshot
+        if not board and not allow_empty:
+            return  # nothing placed yet — don't overwrite a good snapshot
         hero = self._combat_hero(opponent_id, controller)
         lobby_hero = self.lobby_heroes().get(opponent_id)
         hero_name = (lobby_hero.name if lobby_hero else "") or (hero.name if hero else "")
@@ -669,12 +675,15 @@ class BgGame:
             buddy_dbf=(hero.tag("BACON_COMPANION_ID", 0) or 0) if hero else 0,
             minions=[self._minion(e) for e in board],
         )
-        self.snapshots[opponent_id] = snap
         lst = self.history.setdefault(opponent_id, [])
         if lst and lst[-1].round_num == snap.round_num:
+            if not board and lst[-1].minions:
+                return  # never replace a placed board with an empty capture
             lst[-1] = snap  # re-capture of the same combat: keep the newest
         else:
             lst.append(snap)
+        if board:
+            self.snapshots[opponent_id] = snap  # live "last seen board" view
         self._combat_snaps.append(snap)
         if self.debug:
             print(f"-- snapshot: turn={self.turn} round={snap.round_num} "

@@ -64,6 +64,7 @@
   .cap { color: var(--muted); font-size: 11.5px; padding: 3px 4px 10px; }
   .cap b { color: var(--tier); font-weight: 600; }
   .cap .duo { color: var(--accent); }
+  .cap .hero { color: var(--gold); }
   .cap .career { color: var(--ink-2); display: block; }
   .power { color: var(--ink-2); font-size: 11.5px; padding: 0 4px 10px; margin-top: -6px; }
   .power b { color: var(--ink); }
@@ -107,8 +108,9 @@ const RACE_LABELS = {
 
 const TABS = [
   ["minions", "Minions"], ["spells", "Spells"],
-  ["trinkets", "Trinkets"], ["heroes", "Heroes"],
+  ["trinkets", "Trinkets"], ["heroes", "Heroes"], ["buddies", "Buddies"],
 ];
+const STATTED = new Set(["minions", "buddies"]);
 
 // [label, predicate] — a chip is offered only if some card in the tab matches.
 const EFFECTS = [
@@ -169,7 +171,9 @@ function matches(c) {
     if (!(c.n || "").toLowerCase().includes(q) &&
         !(c.x || "").toLowerCase().includes(q) &&
         !(c.pn || "").toLowerCase().includes(q) &&
-        !(c.px || "").toLowerCase().includes(q)) return false;
+        !(c.px || "").toLowerCase().includes(q) &&
+        !(c.hn || "").toLowerCase().includes(q) &&
+        !(c.bn || "").toLowerCase().includes(q)) return false;
   }
   return true;
 }
@@ -182,13 +186,19 @@ function sortKey(c) {
 
 function caption(c) {
   const bits = [];
-  if (state.tab === "minions" || state.tab === "spells") bits.push(`<b>T${c.t || "?"}</b>`);
+  if (state.tab === "minions" || state.tab === "spells" || state.tab === "buddies") {
+    bits.push(`<b>T${c.t || "?"}</b>`);
+  }
   if (state.tab === "trinkets" || state.tab === "spells") bits.push(`${c.c || 0} gold`);
   if (state.tab === "heroes" && c.ar) bits.push(`${c.ar} armor`);
   const r = tribeOf(c).map(x => RACE_LABELS[x] || x).join("/");
   if (r) bits.push(r);
   if (c.d) bits.push('<span class="duo">Duos</span>');
+  if (state.tab === "buddies" && c.hn) bits.push(`<span class="hero">${c.hn}</span>`);
   let cap = bits.join(" · ");
+  if (state.tab === "heroes" && c.bn) {
+    cap += `<span class="career">buddy: ${c.bn} (T${c.bt || "?"})</span>`;
+  }
   const career = DATA.career[c.id];
   if (state.tab === "heroes" && career && career.length) {
     const avg = (career.reduce((a, b) => a + b, 0) / career.length).toFixed(1);
@@ -210,7 +220,7 @@ function tile(c) {
   img.src = chain[step];
   const fb = document.createElement("div");
   fb.className = "fallback";
-  const stats = state.tab === "minions" ? `<div class="fstats">${c.a}/${c.h}</div>` : "";
+  const stats = STATTED.has(state.tab) ? `<div class="fstats">${c.a}/${c.h}</div>` : "";
   fb.innerHTML = `<div class="fname">${c.n}</div>${stats}` +
                  `<div class="ftext">${c.x || ""}</div>`;
   img.onerror = () => {

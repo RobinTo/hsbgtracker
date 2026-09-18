@@ -37,6 +37,19 @@ def own_snaps(game):
     return game.get("history", {}).get(str(game.get("own_pid")), [])
 
 
+def team_snaps(game):
+    """One snapshot per combat round for our team: our own board where we
+    have it, otherwise (duos) the teammate's. The tracker files a duos combat
+    under whichever partner's board it captured, and the result belongs to
+    the team either way. Returns [(snap, is_own)] sorted by round."""
+    rounds = {s["round_num"]: (s, True) for s in own_snaps(game)}
+    mate = game.get("teammate")
+    if mate:
+        for s in game.get("history", {}).get(str(mate), []):
+            rounds.setdefault(s["round_num"], (s, False))
+    return [rounds[r] for r in sorted(rounds)]
+
+
 def main():
     cards = CardDb()
     games = load_games()
