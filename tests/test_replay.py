@@ -67,6 +67,14 @@ def test_duos_game1():
     check("duos: teammate snapshot count", len(g.history.get(7, [])), 11)
     check("duos: teammate final round", g.history.get(7, [])[-1].round_num, 14)
     check("duos: name of pid 1", g.player_names.get(1), "MrAzaghast")
+    # Only a combat's first fighter is named; swap-ins (7: teammate,
+    # 8: never led a combat) stay unnamed rather than inheriting a battletag.
+    check(
+        "duos: names",
+        {p: n for p, n in g.player_names.items() if 1 <= p <= 8},
+        {1: "MrAzaghast", 2: "Rugokiller", 3: "bosola98", 4: "Zinger",
+         5: "Groomvol", 6: "Kreativ#2118"},
+    )
     check("duos: hp_track length", len(g.hp_track), 13)
     check("duos: final effective hp", g.hp_track[-1][1], 20)
 

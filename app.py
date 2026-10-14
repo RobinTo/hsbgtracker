@@ -21,6 +21,7 @@ import tkinter as tk
 from badges import compute_badges, game_summary
 from cards import CardDb
 from images import ArtStore
+from leaderboard import Leaderboards, fmt_rating
 from parser import BgGame
 from stats import load_games
 
@@ -481,6 +482,8 @@ class TrackerApp:
         self.dirty = threading.Event()
         self.art_dirty = threading.Event()
         self.art = ArtStore(on_new=self.art_dirty.set)
+        # A freshly loaded board changes ratings everywhere: full redraw.
+        self.ratings = Leaderboards(on_update=self.art_dirty.set)
         self.tooltip = Tooltip(root, self.cards, self.art)
         self.pinned_pid: int | None = None
 
@@ -1195,8 +1198,11 @@ class TrackerApp:
                 "econ": dict(self.game.econ),
                 "tier_ups": list(self.game.tier_ups),
                 "spectating": self.game.spectating,
+                "region": self.game.region,
+                "duos": self.game.is_duos,
             }
             self.cards.learn_all(self.game.learned_names)
+        view["ratings"] = self._ratings(view)
         self._view = view
         self._last_data = time.time()
         self._check_patch()
@@ -1245,6 +1251,19 @@ class TrackerApp:
             self._autosize_mini()
         self._sync_lobby(view)
         self._tick_status()
+
+    def _ratings(self, view) -> dict:
+        """pid -> leaderboard rating text for named opponents."""
+        out = {}
+        if not view["in_bg"] or view["spectating"]:
+            return out
+        for pid, name in view["names"].items():
+            if pid in (view["friendly"], view["teammate"]) or pid not in view["heroes"]:
+                continue
+            txt = fmt_rating(self.ratings.lookup(view["region"], view["duos"], name))
+            if txt:
+                out[pid] = f"◆ {txt}"
+        return out
 
     # ------------------------------------------------------------ hero logic
 
@@ -1309,7 +1328,8 @@ class TrackerApp:
             snap, minions, idx, _h = self._fighter_data(view, pid)
             parts.append((pid, id(snap), idx, snap.result if snap else "",
                           len(minions) if minions else 0))
-        key = ("team", tuple(parts), self.pinned_pid, view["next_opp"])
+        key = ("team", tuple(parts), self.pinned_pid, view["next_opp"],
+               tuple(view["ratings"].get(p) for p in team))
         if key == self._hero_key:
             return
         self._hero_key = key
@@ -1389,6 +1409,8 @@ class TrackerApp:
                      font=(MONO, 8), padx=5, pady=1).pack(side="left", padx=(0, 6))
 
         meta = []
+        if pid in view["ratings"]:
+            meta.append(view["ratings"][pid])
         st = view["statuses"].get(pid, {})
         ehp = st.get("hp", 0) + st.get("armor", 0)
         if ehp > 0:
@@ -1657,7 +1679,8 @@ class TrackerApp:
                     and self._last_opp != anchor)
         results = self._fight_results(view)
         key = ("mini", self.mini_state, mode, tuple(parts), can_prev,
-               view["turn"], tuple(results))
+               view["turn"], tuple(results),
+               tuple(view["ratings"].get(p) for p in team))
         if key == self._hero_key:
             return
         self._hero_key = key
@@ -1700,6 +1723,8 @@ class TrackerApp:
             if len(team) > 1 and pid in heroes:
                 nm = heroes[pid].name or self.cards.name(heroes[pid].card_id)
                 meta.append(nm.split()[0] if nm else "?")
+            if pid in view["ratings"]:
+                meta.append(view["ratings"][pid])
             st = view["statuses"].get(pid, {})
             ehp = st.get("hp", 0) + st.get("armor", 0)
             if ehp > 0:
@@ -1953,14 +1978,18 @@ class TrackerApp:
                                highlightthickness=0)
             thumbs.pack(side="left", pady=7)
 
-            sigma = tk.Label(row, text="", bg=bgc, fg=FG2, font=(MONO, 9, "bold"))
-            sigma.pack(side="right", padx=10)
+            right = tk.Frame(row, bg=bgc)
+            right.pack(side="right", padx=10)
+            sigma = tk.Label(right, text="", bg=bgc, fg=FG2, font=(MONO, 9, "bold"))
+            sigma.pack(anchor="e")
+            rating = tk.Label(right, text="", bg=bgc, fg=FG_DIM, font=(MONO, 8))
+            rating.pack(anchor="e")
 
-            for wdg in (row, face, names, nm, sub, thumbs, sigma):
+            for wdg in (row, face, names, nm, sub, thumbs, right, sigma, rating):
                 wdg.bind("<Button-1>", lambda _e, p=pid: self._pin(p))
             self._lobby_rows[pid] = {
                 "row": row, "nm": nm, "sub": sub, "thumbs": thumbs,
-                "sigma": sigma, "snap_id": None, "cache": None,
+                "sigma": sigma, "rating": rating, "snap_id": None, "cache": None,
             }
 
         if dead_groups:
@@ -2030,13 +2059,16 @@ class TrackerApp:
             sigma = f"{sum(m.attack for m in minions):,}/{sum(m.health for m in minions):,}" \
                 if minions else "—"
 
+            rating = view["ratings"].get(pid, "")
+
             cache = (name, sub, sigma,
-                     BLUE if (is_self or is_mate) else FG_DIM)
+                     BLUE if (is_self or is_mate) else FG_DIM, rating)
             if refs["cache"] != cache:
                 refs["cache"] = cache
                 refs["nm"].configure(text=name)
                 refs["sub"].configure(text=sub, fg=cache[3])
                 refs["sigma"].configure(text=sigma)
+                refs["rating"].configure(text=rating)
 
             snap_key = ("live", len(minions or [])) if is_self else id(snap)
             if refs["snap_id"] != snap_key:

@@ -6,3 +6,4 @@ games_history.jsonl
 tests/data/
 *.lnk
 stats.html
+leaderboard_cache/

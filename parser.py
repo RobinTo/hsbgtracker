@@ -138,6 +138,7 @@ class BgGame:
         self.entities: dict[int, Entity] = {}
         self.player_names: dict[int, str] = {}  # lobby player id -> battletag
         self.friendly_controller = 0
+        self.region = 0  # Battle.net region byte of our account
         self.enemy_controller = 0
         self.teammate_id = 0  # duos: lobby id of our partner
         self.next_opponent_id = 0
@@ -146,6 +147,7 @@ class BgGame:
         # Lobby id of the opponent whose warband is being set up this combat;
         # set by BACON_CURRENT_COMBAT_PLAYER_ID, consumed at STEP=MAIN_START.
         self._pending_combat_opponent = 0
+        self._unnamed_fighter = 0  # first fighter whose battletag is pending
         # Duos: mid-combat the fallen fighter's partner steps in. The same
         # tag announces them; we snapshot once their board is placed. The
         # friendly side alternates fighters too — when our teammate fights,
@@ -211,6 +213,7 @@ class BgGame:
             pid = int(m.group("pid"))
             if int(m.group("hi")) != 0 and not self.friendly_controller:
                 self.friendly_controller = pid
+                self.region = (int(m.group("hi")) >> 32) & 0xFF  # 1 US, 2 EU, 3+ Asia
             else:
                 self.enemy_controller = pid
             ent = self._entity(int(m.group("eid")))
@@ -314,7 +317,24 @@ class BgGame:
         # player-name refs (e.g. "Kreativ#2118") carry NEXT_OPPONENT_PLAYER_ID.
         if ref == "GameEntity":
             return self._entity(1)
-        return self._entity_by_name(ref)
+        ent = self._entity_by_name(ref)
+        if self._unnamed_fighter and self._name_fighter(ent, self._unnamed_fighter):
+            self._unnamed_fighter = 0
+        return ent
+
+    def _name_fighter(self, ent: Entity, pid: int) -> bool:
+        """Record the enemy seat's name as lobby player pid's battletag."""
+        if (
+            ent.name
+            and "UNKNOWN" not in ent.name
+            and not ent.card_id  # player entities have no card; skips Bob
+            # In duos our own seat gets tagged with the teammate's id;
+            # never record our own battletag for another player.
+            and ent.name != self.player_names.get(self.friendly_controller)
+        ):
+            self.player_names[pid] = ent.name
+            return True
+        return False
 
     def _entity(self, eid: int) -> Entity:
         ent = self.entities.get(eid)
@@ -372,8 +392,11 @@ class BgGame:
                 else:
                     self._pending_combat_friendly = pid
             elif pid > 0 and self.friendly_controller:
+                # The enemy seat keeps the first fighter's battletag for the
+                # whole combat — a duos swap-in's name never reaches the log.
+                swap_in = self._in_combat and pid != self._last_combat_pid
                 if self._in_combat:
-                    if pid != self._last_combat_pid:
+                    if swap_in:
                         self._pending_swap = pid
                 elif self._cycle_started:
                     # Combat announced after MAIN_START — enter combat mode
@@ -389,15 +412,13 @@ class BgGame:
                     self._pending_swap = pid
                 else:
                     self._pending_combat_opponent = pid
-                if (
-                    ent.name
-                    and "UNKNOWN" not in ent.name
-                    and not ent.card_id  # player entities have no card; skips Bob
-                    # In duos our own seat gets tagged with the teammate's id;
-                    # never record our own battletag for another player.
-                    and ent.name != self.player_names.get(self.friendly_controller)
-                ):
-                    self.player_names[pid] = ent.name
+                if swap_in:
+                    self._unnamed_fighter = 0
+                elif not self._name_fighter(ent, pid) and self._pid_hp(pid) > 0:
+                    # Seat still wears Bob's name; the battletag arrives on
+                    # the next player-name ref (before any swap). A dead
+                    # player's ghost shows up as "Kel'Thuzad" instead.
+                    self._unnamed_fighter = pid
         elif tag == "BACON_DUO_TEAMMATE_PLAYER_ID":
             if ent.tag("PLAYER_ID") == self.friendly_controller and str(value).isdigit():
                 self.teammate_id = int(value)
@@ -472,6 +493,7 @@ class BgGame:
             self._pending_friendly_swap = 0
             self._in_combat = False
             self._cycle_started = False
+            self._unnamed_fighter = 0
         elif step == "MAIN_START":
             self._cycle_started = True
         if step == "MAIN_START" and self._pending_combat_opponent:

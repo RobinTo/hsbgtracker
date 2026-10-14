@@ -52,6 +52,12 @@ pythonw app.py
   and keywords (Taunt, Divine Shield, Poisonous, Reborn, ...)
 - Round the board was seen on, the player's battletag when the log reveals
   it, and their tavern tier at that time
+- Opponent rating (◆) from Blizzard's public leaderboard, looked up by
+  battletag once the log reveals it (their first combat as lead fighter;
+  a duos partner who never leads stays unrated). Only players above the
+  leaderboard cutoff are listed; anyone else shows `◆ <8k`. Boards are
+  downloaded in the background, cached in `leaderboard_cache/` and
+  refreshed hourly
 - Click a row to pin it (click again to unpin); "on top" checkbox toggles
   always-on-top
 
